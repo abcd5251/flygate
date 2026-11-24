@@ -159,6 +159,11 @@ export type Booking = {
   bookingId?: string;
   /** Live: the quoted price in QOR on diana ("3.89"), shown next to the US$ price (D-14). */
   priceQor?: string;
+  /**
+   * A Live step failed and the presenter chose "Finish in Simulated mode" (D-26): which step and
+   * its error. Steps after it ran simulated; steps already on-chain keep "Live tx".
+   */
+  fallback?: { step: BookingStepKey; detail?: string };
 };
 
 export type FeedItem = {

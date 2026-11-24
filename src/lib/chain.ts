@@ -98,6 +98,30 @@ export type QuoteCheck = { ok: boolean; detail: string; source: TxSource; readRe
  * `verified` whether it checked out (Live: confirmTicket() succeeded).
  */
 export type TicketProofResult = { proof: ChainTx; release: ChainTx; sigBytes?: number; sigPreview?: string; verified: boolean };
+/** A tx found on-chain by its event log (0x hash) and its explorer link. */
+export type OnchainTxRef = { hash: string; explorerUrl: string };
+
+/** FlightEscrow's Status of one booking, as its events tell it. */
+export type OnchainBookingState = "None" | "Locked" | "Released" | "Refunded";
+
+/**
+ * The booking-state query (Live read, no broadcast): what diana says happened to `bookingId`,
+ * from its `Booked`, `Released` and `Refunded` events. After a reload the page asks this instead
+ * of sending the step again (D-28). `deadline` (unix s) is when `refund()` opens for a Locked one.
+ */
+export type BookingStateResult =
+  | {
+      ok: true;
+      source: "live";
+      bookingId: string;
+      state: OnchainBookingState;
+      booked?: OnchainTxRef;
+      released?: OnchainTxRef;
+      refunded?: OnchainTxRef;
+      deadline?: number;
+    }
+  | { ok: false; source: TxSource; code: string; reason: string };
+
 /**
  * The Booking fails refund. Live: `tx` is the merchant-signed cancel() the agent EOA submitted;
  * after it succeeds the server reads the refund address (the owner's EVM signer, ADR-0002) once:
@@ -149,6 +173,8 @@ export interface ChainPort {
   /** The merchant cancels a locked booking and the escrow refunds the owner (Booking fails). */
   cancelBooking(input: BookingChainInput): Promise<CancelResult>;
   checkFareCap(input: FareCapInput): Promise<FareCapCheck>;
+  /** Where a booking stands on-chain (Live read); Simulated has no chain to ask. */
+  bookingState(input: { bookingId: string }): Promise<BookingStateResult>;
   status(): Promise<ChainStatus>;
 }
 
@@ -220,15 +246,13 @@ export const simulatedChain: ChainPort = {
   async checkFareCap() {
     return { source: "simulated", tx: makeTx("Backup on-chain check: overspend rejected", "perTxLimit", "agent", false, "abstractaccount 5") };
   },
+  async bookingState() {
+    return { ok: false, source: "simulated", code: "simulated", reason: "Simulated bookings are not on-chain" };
+  },
   async status() {
     return { available: true, escrow: ADDRESSES.escrow, explorer: CHAIN.explorer };
   },
 };
-
-/** Live chain operations that later tickets fill in (#20 /mandate, #21-#23 /checkout). */
-function notYetLive(op: string): never {
-  throw new Error(`Live ${op} is not available yet`);
-}
 
 /** A live step that failed before the server could answer: no hash, no "Live tx" label. */
 function liveFailure(reason: string, code: string): ChainTx {
@@ -288,6 +312,9 @@ export const liveChain: ChainPort = {
       release: liveFailure(reason, code),
       verified: false,
     }));
+  },
+  async bookingState({ bookingId }) {
+    return postLive<BookingStateResult>("/api/live/checkout", { step: "state", bookingId }, (reason, code) => ({ ok: false, source: "live", code, reason }));
   },
   async cancelBooking({ bookingId }) {
     return postLive<CancelResult>("/api/live/checkout", { step: "cancel", bookingId }, (reason, code) => ({ tx: liveFailure(reason, code) }));
