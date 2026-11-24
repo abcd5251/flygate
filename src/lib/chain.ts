@@ -98,6 +98,12 @@ export type QuoteCheck = { ok: boolean; detail: string; source: TxSource; readRe
  * `verified` whether it checked out (Live: confirmTicket() succeeded).
  */
 export type TicketProofResult = { proof: ChainTx; release: ChainTx; sigBytes?: number; sigPreview?: string; verified: boolean };
+/**
+ * The Booking fails refund. Live: `tx` is the merchant-signed cancel() the agent EOA submitted;
+ * after it succeeds the server reads the refund address (the owner's EVM signer, ADR-0002) once:
+ * `readResult` / `balanceQor` ("Live read"), or `readError` when that read failed.
+ */
+export type CancelResult = { tx: ChainTx; refundTo?: string; balanceQor?: string; readResult?: string; readError?: string };
 /** `bookingId` is the Live quote whose book() is simulated (absent in Simulated mode). */
 export type FareCapInput = { offerId: string; priceUsd: number; maxFareUsd: number; bookingId?: string };
 
@@ -140,7 +146,8 @@ export interface ChainPort {
   lockFunds(input: BookingChainInput): Promise<ChainTx>;
   /** The merchant signs the TicketProof and confirmTicket() pays out (`release`, same tx). */
   confirmTicket(input: TicketInput): Promise<TicketProofResult>;
-  cancelBooking(input: BookingChainInput): Promise<ChainTx>;
+  /** The merchant cancels a locked booking and the escrow refunds the owner (Booking fails). */
+  cancelBooking(input: BookingChainInput): Promise<CancelResult>;
   checkFareCap(input: FareCapInput): Promise<FareCapCheck>;
   status(): Promise<ChainStatus>;
 }
@@ -208,7 +215,7 @@ export const simulatedChain: ChainPort = {
     };
   },
   async cancelBooking({ amountUsd }) {
-    return makeTx(`Refund ${usd(amountUsd)}`, "FlightEscrow.cancel()", "contract");
+    return { tx: makeTx(`Refund ${usd(amountUsd)}`, "FlightEscrow.cancel()", "contract") };
   },
   async checkFareCap() {
     return { source: "simulated", tx: makeTx("Backup on-chain check: overspend rejected", "perTxLimit", "agent", false, "abstractaccount 5") };
@@ -282,8 +289,8 @@ export const liveChain: ChainPort = {
       verified: false,
     }));
   },
-  async cancelBooking() {
-    return notYetLive("cancelBooking");
+  async cancelBooking({ bookingId }) {
+    return postLive<CancelResult>("/api/live/checkout", { step: "cancel", bookingId }, (reason, code) => ({ tx: liveFailure(reason, code) }));
   },
   async checkFareCap({ bookingId }) {
     return postLive<FareCapCheck>("/api/live/checkout", { step: "farecap", bookingId }, (reason, code) => ({ source: "live", ok: false, code, detail: reason }));

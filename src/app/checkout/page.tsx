@@ -148,8 +148,22 @@ export default function CheckoutPage() {
             await wait(1200);
             if (cancelled) return "stop";
             const amount = b.quotedPriceUsd ?? b.priceUsd;
-            const tx = await chain.cancelBooking({ offerId: offer!.id, amountUsd: amount });
+            const r = await chain.cancelBooking({ offerId: offer!.id, amountUsd: amount, bookingId: b.bookingId });
+            const tx = r.tx;
+            if (tx.source === "live" && !tx.ok) {
+              // The fare stays locked; FlightEscrow refunds it once the ticket window passes (D-26).
+              const f = failedTx(tx);
+              setStep("refund", { ...f, actor: "merchant", detail: `${f.detail} · booking ${b.bookingId ?? "?"}: refunds after the ticket window` });
+              return "stop";
+            }
             addTx(tx);
+            // Live: the merchant signed the CancelProof, the agent EOA submitted cancel() (D-19),
+            // then one balance read of the refund address shows the money is back (D-18, D-10).
+            const refundDetail =
+              tx.source === "live"
+                ? `${b.priceQor ?? "?"} QOR back to your refund address ${shortAddr(r.refundTo ?? "", 8, 4)} · submitted by agent · ${r.balanceQor ? `balance now ${r.balanceQor}` : (r.readError ?? "balance not read")}`
+                : `${amount} fUSD back to ${shortAddr(ADDRESSES.owner, 8, 4)}`;
+            const liveFields: Partial<BookingStep> = tx.source === "live" ? { actor: "merchant", msg: "FlightEscrow.cancel()", readResult: r.readResult } : {};
             update((st) => ({
               ...st,
               scenario: "normal",
@@ -160,7 +174,7 @@ export default function CheckoutPage() {
                     ...st.booking,
                     status: "refunded",
                     steps: st.booking.steps.map((x) =>
-                      x.key === "refund" ? { ...x, status: "done", detail: `${amount} fUSD back to ${shortAddr(ADDRESSES.owner, 8, 4)}`, ...txStep(tx), at: Date.now() } : x,
+                      x.key === "refund" ? { ...x, status: "done", detail: refundDetail, ...liveFields, ...txStep(tx), at: Date.now() } : x,
                     ),
                   }
                 : st.booking,
@@ -372,6 +386,7 @@ export default function CheckoutPage() {
                         <Pill tone={ACTOR_TONE[actor]}>{msg?.startsWith("agent EOA") ? "Agent EOA" : ACTOR_LABEL[actor]}</Pill>
                         {st.status === "done" && realCrypto && <SourceTag kind="crypto" />}
                         {st.source === "live" && (st.status === "done" || (st.status === "failed" && st.readResult && !st.hash)) && <SourceTag kind={st.hash ? "live-tx" : "live-read"} />}
+                        {st.status === "done" && st.source === "live" && st.hash && st.readResult && <SourceTag kind="live-read" />}
                       </div>
                       {msg && <p className="font-mono text-xs text-muted">{msg}</p>}
                       {st.detail && <p className={cx("mt-1 text-sm", st.status === "failed" ? "text-block" : "text-ink-2")}>{st.detail}</p>}

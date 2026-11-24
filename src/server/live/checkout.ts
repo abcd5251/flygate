@@ -2,7 +2,7 @@ import "server-only";
 import { executeEvmMsg, evmAuthSignBytes, evmAuthSignBytesV2 } from "@qorechain/sdk";
 import { decodeFunctionResult, hexToBytes, keccak256, stringToBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import type { CheckoutQuote, FareCapCheck, QuoteCheck, TicketProofResult } from "@/lib/chain";
+import type { CancelResult, CheckoutQuote, FareCapCheck, QuoteCheck, TicketProofResult } from "@/lib/chain";
 import {
   bookingId as bookingIdOf,
   Cabin as EscrowCabin,
@@ -25,6 +25,7 @@ import { usd } from "@/lib/mandate";
 import { DEMO_OFFERS, PRICE_CHANGE_USD } from "@/lib/offers";
 import type { Cabin, ChainTx, Mandate, Offer, Scenario } from "@/lib/types";
 import type { CosmosMsg, EvmAuthDigestVersion, Hex, ServerChain } from "./chain";
+import { createCancelStep } from "./cancel";
 import type { BookLane, LiveConfig } from "./config";
 import { fareCapCheck } from "./farecap";
 import type { LiveKeys } from "./keys";
@@ -41,7 +42,7 @@ import { errorText, txFactory, type Clock, type StepResult, type TxText } from "
  *
  * Every broadcast is idempotent per (step, bookingId) (D-28) and never retried.
  */
-export const CHECKOUT_STEPS = ["quote", "verify", "lock", "proof", "farecap"] as const;
+export const CHECKOUT_STEPS = ["quote", "verify", "lock", "proof", "farecap", "cancel"] as const;
 export type CheckoutStep = (typeof CHECKOUT_STEPS)[number];
 
 /** A quote is valid for 20 minutes, like the simulated one (D-15). */
@@ -70,7 +71,7 @@ export interface CheckoutInput {
   pnr?: unknown;
 }
 
-export type CheckoutResponse = CheckoutQuote | QuoteCheck | ChainTx | TicketProofResult | FareCapCheck;
+export type CheckoutResponse = CheckoutQuote | QuoteCheck | ChainTx | TicketProofResult | FareCapCheck | CancelResult;
 
 // ------------------------------------------------------------------ parsing
 
@@ -350,6 +351,22 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
     return (await once("proof", id, run, onError)) as TicketProofResult;
   }
 
+  // Booking fails: the merchant's cancel() refunds the owner (#23, src/server/live/cancel.ts).
+  const cancelStep = createCancelStep({
+    chain,
+    tx,
+    keys,
+    booking: (id) => quotes.get(id),
+    locked: async (id) => {
+      const l = done.get(`lock:${id}`);
+      return !!l && (await l).ok;
+    },
+  });
+  async function cancel(input: CheckoutInput): Promise<CancelResult> {
+    const id = parseBookingId(input.bookingId);
+    return (await once("cancel", id, () => cancelStep.run(id), (err) => cancelStep.onError(id, err))) as CancelResult;
+  }
+
   async function checkout(input: CheckoutInput): Promise<CheckoutResponse> {
     const step = input.step;
     if (typeof step !== "string" || !(CHECKOUT_STEPS as readonly string[]).includes(step)) {
@@ -370,9 +387,11 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
         if (!b) return { source: "live", ok: false, code: "unknown booking", detail: "The server has no quote for this booking; nothing was checked" } satisfies FareCapCheck;
         return fareCapCheck({ chain, keys, sender: bookSender }, b);
       }
+      case "cancel":
+        return cancel(input);
     }
   }
 
-  return { checkout, quote, verify, lock, proof };
+  return { checkout, quote, verify, lock, proof, cancel };
 }
 
