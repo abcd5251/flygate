@@ -5,6 +5,7 @@ import {
   encodeAbiParameters,
   hexToBytes,
   keccak256,
+  parseAbi,
   stringToBytes,
   stringToHex,
   type Address,
@@ -105,7 +106,8 @@ const cancelAbi = [
   },
 ] as const;
 
-function cityCode(code: CityCode): Hex {
+/** A city code as bytes3 ("TPE" -> 0x545045). */
+export function cityCode(code: CityCode): Hex {
   if (!/^[A-Z]{3}$/.test(code)) throw new Error(`city code must be 3 uppercase letters: ${code}`);
   return stringToHex(code, { size: 3 });
 }
@@ -183,3 +185,21 @@ export const signTicketProof = (t: TicketProof, d: Domain, keys: MerchantKeys) =
   signMessage(ticketMessage(t, d), keys.secretKey);
 export const signCancelProof = (c: CancelProof, d: Domain, keys: MerchantKeys) =>
   signMessage(cancelMessage(c, d), keys.secretKey);
+
+/** The FlightEscrow functions and events the e2e script and frontend use (human-readable ABI). */
+export const escrowAbi = parseAbi([
+  "struct Mandate { address merchant; uint256 maxFareWei; uint32 maxTickets; uint64 expiresAt; bytes3 origin; bytes3 destination; uint32 departFrom; uint32 departTo; uint8 cabin; bool refundableOnly; bytes32 mandateHash; }",
+  "struct Quote { address merchant; address agent; bytes32 offerId; uint256 priceWei; bytes3 origin; bytes3 destination; uint32 departDay; uint8 cabin; bool refundable; uint64 expiresAt; uint32 ticketWindow; }",
+  "struct TicketProof { bytes32 bookingId; bytes32 pnrHash; uint64 issuedAt; }",
+  "struct CancelProof { bytes32 bookingId; uint8 reasonCode; }",
+  "function setMandate(address agent, Mandate mandate)",
+  "function revokeMandate(address agent)",
+  "function book(Quote quote, bytes signature) payable returns (bytes32 bookingId)",
+  "function confirmTicket(TicketProof proof, bytes signature)",
+  "function cancel(CancelProof proof, bytes signature)",
+  "function refund(bytes32 bookingId)",
+  "event MandateSet(address indexed owner, address indexed agent, address indexed merchant, bytes32 mandateHash)",
+  "event Booked(bytes32 indexed bookingId, address indexed agent, address indexed merchant, uint256 priceWei, uint64 deadline)",
+  "event Released(bytes32 indexed bookingId, bytes32 pnrHash)",
+  "event Refunded(bytes32 indexed bookingId, uint8 reason)",
+]);

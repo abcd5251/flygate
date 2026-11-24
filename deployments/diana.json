@@ -1,0 +1,26 @@
+{
+  "network": "qorechain-diana",
+  "evmChainId": 9800,
+  "explorer": "https://explore.qore.network",
+  "funding": [
+    {
+      "label": "owner account -> owner EVM signer",
+      "amountUqor": "2000000",
+      "tx": {
+        "hash": "96C299783C0D6D1BE5144777CC176B1114B3EC1C2A41B5E02DA0E0A086574FF8",
+        "block": 10655598,
+        "url": "https://explore.qore.network/tx/96C299783C0D6D1BE5144777CC176B1114B3EC1C2A41B5E02DA0E0A086574FF8"
+      }
+    },
+    {
+      "label": "agent account -> agent EVM signer",
+      "amountUqor": "5000000",
+      "tx": {
+        "hash": "41AC52ABE5D78A0A6E20CAB2B8110C40232933BA71F1A3B6F65179EEF3E7916A",
+        "block": 10655602,
+        "url": "https://explore.qore.network/tx/41AC52ABE5D78A0A6E20CAB2B8110C40232933BA71F1A3B6F65179EEF3E7916A"
+      }
+    }
+  ],
+  "flows": {}
+}

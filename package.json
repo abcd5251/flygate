@@ -9,6 +9,8 @@
     "lint": "eslint",
     "bootstrap": "tsx scripts/bootstrap/index.ts",
     "evm:check": "tsx scripts/evm/check.ts",
+    "escrow:deploy": "tsx scripts/escrow/deploy.ts",
+    "escrow:e2e": "tsx scripts/escrow/e2e.ts",
     "test:scripts": "tsx --test 'scripts/**/*.test.ts'",
     "test:contracts": "forge test",
     "test:contracts:ffi": "FOUNDRY_PROFILE=ffi forge test"
