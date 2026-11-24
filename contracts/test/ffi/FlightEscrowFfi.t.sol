@@ -112,6 +112,21 @@ contract FlightEscrowFfiTest is Test {
         escrow.confirmTicket(t, quoteSig);
     }
 
+    function test_ffi_cancelAcceptsRealTsCancelProof() public {
+        FlightEscrow.Quote memory q = _quote();
+        vm.prank(agent);
+        bytes32 bookingId = escrow.book{value: q.priceWei}(q, _signQuote(q));
+
+        FlightEscrow.CancelProof memory c = FlightEscrow.CancelProof({bookingId: bookingId, reasonCode: 3});
+        bytes memory sig = _signCancel(c);
+
+        vm.expectEmit(address(escrow));
+        emit FlightEscrow.Refunded(bookingId, FlightEscrow.RefundReason.Cancelled);
+        escrow.cancel(c, sig);
+
+        assertEq(owner.balance, q.priceWei, "owner refunded");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     function _quote() internal view returns (FlightEscrow.Quote memory) {
@@ -159,6 +174,17 @@ contract FlightEscrowFfiTest is Test {
         args[4] = vm.toString(t.bookingId);
         args[5] = vm.toString(t.pnrHash);
         args[6] = vm.toString(uint256(t.issuedAt));
+        return _ffi(args);
+    }
+
+    function _signCancel(FlightEscrow.CancelProof memory c) internal returns (bytes memory) {
+        string[] memory args = new string[](6);
+        args[0] = "sign-cancel";
+        args[1] = vm.toString(MERCHANT_SEED);
+        args[2] = vm.toString(block.chainid);
+        args[3] = vm.toString(address(escrow));
+        args[4] = vm.toString(c.bookingId);
+        args[5] = vm.toString(uint256(c.reasonCode));
         return _ffi(args);
     }
 
