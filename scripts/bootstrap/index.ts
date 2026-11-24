@@ -14,6 +14,9 @@ import {
   makeClient,
   pqcStatusOf,
   registerPqc,
+  topUp,
+  TOP_UP_BELOW,
+  TOP_UP_TO,
   type RoleAccount,
 } from "./chain";
 import { explorerTxUrl, printReport, type AccountRow, type SentTx } from "./report";
@@ -63,16 +66,36 @@ async function waitForOwnerFunds(ctx: Context): Promise<void> {
   console.log(`Owner funded: ${formatQor(balance)}`);
 }
 
-async function registerOwnerPqc(ctx: Context): Promise<void> {
-  const owner = ctx.accounts.owner;
-  const tx = await connect(ctx.client, owner);
+const LABEL: Record<Role, string> = { owner: "Owner", agent: "Agent", merchant: "Merchant" };
+
+async function registerRolePqc(ctx: Context, role: Role): Promise<void> {
+  const who = ctx.accounts[role];
+  const tx = await connect(ctx.client, who);
   try {
-    const res = await registerPqc(ctx.network, tx, owner);
+    const res = await registerPqc(ctx.network, tx, who);
     if (res.alreadyRegistered) {
-      console.log("Owner ML-DSA-87 key already registered; skipping.");
+      console.log(`${LABEL[role]} ML-DSA-87 key already registered; skipping.`);
     } else if (res.txHash) {
-      console.log(`Owner ML-DSA-87 key registered: ${res.txHash}`);
-      ctx.txs.push({ label: "owner PQC registration", hash: res.txHash });
+      console.log(`${LABEL[role]} ML-DSA-87 key registered: ${res.txHash}`);
+      ctx.txs.push({ label: `${role} PQC registration`, hash: res.txHash });
+    }
+  } finally {
+    tx.disconnect();
+  }
+}
+
+/** Owner hybrid-signs top-ups: agent/merchant below 5 QOR are brought up to 20 QOR. */
+async function fundAgentAndMerchant(ctx: Context): Promise<void> {
+  const tx = await connect(ctx.client, ctx.accounts.owner);
+  try {
+    for (const role of ["agent", "merchant"] as const) {
+      const hash = await topUp(ctx.client, tx, ctx.accounts[role].address);
+      if (hash) {
+        console.log(`Owner topped up ${role} to ${formatQor(TOP_UP_TO)}: ${hash}`);
+        ctx.txs.push({ label: `owner -> ${role} top-up`, hash });
+      } else {
+        console.log(`${LABEL[role]} holds at least ${formatQor(TOP_UP_BELOW)}; no top-up.`);
+      }
     }
   } finally {
     tx.disconnect();
@@ -124,8 +147,8 @@ async function collectRows(ctx: Context, roles: readonly Role[]): Promise<Accoun
   return rows;
 }
 
-/** Roles shown in the verification table. Only the owner is bootstrapped so far. */
-const REPORTED_ROLES: readonly Role[] = ["owner"];
+/** Roles shown in the verification table. */
+const REPORTED_ROLES: readonly Role[] = ROLES;
 
 async function main(): Promise<void> {
   const mode = parseMode(process.argv.slice(2));
@@ -145,7 +168,10 @@ async function main(): Promise<void> {
 
   if (mode === "bootstrap") {
     await waitForOwnerFunds(ctx);
-    await registerOwnerPqc(ctx);
+    await registerRolePqc(ctx, "owner");
+    await fundAgentAndMerchant(ctx);
+    await registerRolePqc(ctx, "agent");
+    await registerRolePqc(ctx, "merchant");
   }
 
   printReport(ctx.network.explorer, await collectRows(ctx, REPORTED_ROLES), ctx.txs);

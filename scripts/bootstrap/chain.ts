@@ -49,7 +49,11 @@ function isRateLimited(err: unknown): boolean {
   return /\b429\b|too many requests|rate.?limit/i.test(msg);
 }
 
-/** Retry public-endpoint calls on rate limiting: up to 3 retries, 1s/2s/4s. */
+/**
+ * Retry public-endpoint calls on rate limiting: up to 3 retries, 1s/2s/4s.
+ * Only for reads and connecting. Never wrap a broadcast: a 429 can arrive after the
+ * tx was accepted, and a retry would send it again.
+ */
 export function retrying<T>(fn: () => Promise<T>): Promise<T> {
   return withRetry(() => fn(), {
     retries: 3,
@@ -91,9 +95,34 @@ export async function registerPqc(
   tx: TxClient,
   who: RoleAccount,
 ): Promise<EnsurePqcRegisteredResult> {
-  // Each attempt re-reads status uncached, so a retry after a landed tx is a no-op.
-  return retrying(() => {
-    clearPqcStatusCache();
-    return ensurePqcRegistered(tx, { pqcKeypair: who.pqcKeypair, rest: network.rest, chainId: network.chainId });
+  // The status read is retried; the broadcast is not (a retry after a landed tx would
+  // re-register and be charged). If the broadcast errors, rerun: the fresh read skips it
+  // when it landed. The pre-read status still gets the key-mismatch check.
+  const status = await pqcStatusOf(network, who.address);
+  return ensurePqcRegistered(tx, {
+    pqcKeypair: who.pqcKeypair,
+    status,
+    rest: network.rest,
+    chainId: network.chainId,
   });
+}
+
+const QOR = BigInt(1_000_000);
+/** Top up agent/merchant only when below this... */
+export const TOP_UP_BELOW = BigInt(5) * QOR;
+/** ...and bring them up to this. */
+export const TOP_UP_TO = BigInt(20) * QOR;
+
+/**
+ * Hybrid-signed owner -> `to` transfer bringing `to` up to TOP_UP_TO when it holds less
+ * than TOP_UP_BELOW. Returns the tx hash, or undefined when no transfer was needed.
+ */
+export async function topUp(client: QoreChainClient, ownerTx: TxClient, to: string): Promise<string | undefined> {
+  // The balance read is retried; the send is not (a retry after a landed send would
+  // send twice). If the send errors, rerun: the fresh balance skips it when it landed.
+  const balance = await balanceOf(client, to);
+  if (balance >= TOP_UP_BELOW) return undefined;
+  const res = await ownerTx.bankSend(to, [{ denom: DENOM, amount: (TOP_UP_TO - balance).toString() }]);
+  if (res.code !== 0) throw new Error(`Transfer to ${to} failed (code ${res.code}): ${res.rawLog ?? ""}`);
+  return res.transactionHash;
 }
