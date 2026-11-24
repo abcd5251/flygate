@@ -6,10 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "bootstrap": "tsx scripts/bootstrap/index.ts"
   },
   "dependencies": {
     "@noble/post-quantum": "^0.7.1",
+    "@qorechain/sdk": "^0.14.0",
     "lucide-react": "^1.78.0",
     "next": "16.4.6",
     "react": "19.3.0",
@@ -23,6 +25,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
     "tailwindcss": "4.3.3",
+    "tsx": "^4.23.15",
     "typescript": "^5"
   },
   "packageManager": "pnpm@10.20.0"
