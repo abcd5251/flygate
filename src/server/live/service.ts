@@ -1,11 +1,29 @@
 import "server-only";
 import type { ChainStatus } from "@/lib/chain";
-import { defaultMandate } from "@/lib/mandate";
+import { FLIGHT_ESCROW_ABI } from "@/lib/escrow";
+import { canonicalJson, defaultMandate } from "@/lib/mandate";
+import type { ChainTx } from "@/lib/types";
 import { ALGORITHM_ML_DSA_87 } from "../../../scripts/evm/pqcKeyStatus";
-import type { Hex, ServerChain } from "./chain";
+import type { BroadcastOutcome, Hex, ServerChain } from "./chain";
 import type { LiveConfig, LiveRole } from "./config";
 import { deriveLiveKeys, mnemonicProblem, publicAddresses, type LiveKeys } from "./keys";
+import {
+  BadRequest,
+  countUsedTickets,
+  LIVE_MANDATE_STEPS,
+  linkMsgs,
+  mandateLimits,
+  onchainMandate,
+  parseMandate,
+  parseMandateHash,
+  setMandateData,
+  STEP_TIMEOUT_MS,
+  windowMsg,
+  type LiveMandateStep,
+} from "./mandate";
 import { formatQor, MAX_FEE_UQOR, usdToUqor } from "./money";
+
+export { BadRequest };
 
 export const DIANA_EVM_CHAIN_ID = 9800;
 /** How long one status result is reused (D-27). */
@@ -19,13 +37,26 @@ export interface Clock {
 
 export type LiveStatus = ChainStatus & { checkedAt: number };
 
+/** POST /api/live/mandate body: structured fields only; the server builds every tx from them (D-08). */
+export interface SetupMandateInput {
+  step: unknown;
+  mandate: unknown;
+  mandateHash: unknown;
+}
+
 /**
  * The server-side Live service. Its operations mirror `ChainPort`; Route Handlers are thin
- * adapters over it. This ticket has `status`; setupMandate, lockFunds, confirmTicket,
- * cancelBooking, checkFareCap and the booking-state query arrive with #20-#24.
+ * adapters over it. lockFunds, confirmTicket, cancelBooking, checkFareCap and the booking-state
+ * query arrive with #21-#24.
  */
 export interface LiveService {
   status(): Promise<LiveStatus>;
+  /**
+   * One owner tx of a Live /mandate, in the fixed order link -> window -> mandate. Idempotent per
+   * (mandate hash, step): a repeat gets the first call's result and never broadcasts again,
+   * also after a failed broadcast. Throws BadRequest for malformed input.
+   */
+  setupMandate(input: SetupMandateInput): Promise<ChainTx>;
 }
 
 export interface LiveServiceDeps {
@@ -104,14 +135,141 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
     }
   }
 
-  return {
-    status() {
-      const now = clock.now();
-      if (!cached || now - cached.at >= STATUS_TTL_MS) {
-        cached = { at: now, result: check().then((r) => ({ ...r, checkedAt: now })) };
+  function status(): Promise<LiveStatus> {
+    const now = clock.now();
+    if (!cached || now - cached.at >= STATUS_TTL_MS) {
+      cached = { at: now, result: check().then((r) => ({ ...r, checkedAt: now })) };
+    }
+    return cached.result;
+  }
+
+  // ---------------------------------------------------------------- /mandate (#20)
+
+  /** Idempotency table: mandate hash -> the mandate it was first used with and each step's result. */
+  const sessions = new Map<Hex, { canonical: string; steps: Map<LiveMandateStep, Promise<StepResult>> }>();
+
+  let txSeq = 0;
+  function liveTx(fields: Pick<ChainTx, "label" | "msg">, r: TxFields): ChainTx {
+    txSeq += 1;
+    return { id: `live_${clock.now()}_${txSeq}`, kind: "owner", source: "live", at: clock.now(), ...fields, ...r };
+  }
+
+  /** A failure found before anything was sent: not cached, so a later call may try again. */
+  function refused(step: LiveMandateStep, code: string, reason: string): StepResult {
+    return { broadcast: false, tx: liveTx(STEP_TEXT[step], { ok: false, hash: "", code, reason }) };
+  }
+
+  function fromOutcome(fields: Pick<ChainTx, "label" | "msg">, o: BroadcastOutcome): StepResult {
+    if (o.status === "success") {
+      return { broadcast: true, tx: liveTx(fields, { ok: true, hash: o.hash, lane: o.lane, explorerUrl: `${explorer}/tx/${o.hash}` }) };
+    }
+    // Failed txs never get an explorer link or the "Live tx" label, only the chain's error code (D-20).
+    return { broadcast: true, tx: liveTx(fields, { ok: false, hash: o.hash ?? "", lane: o.lane, code: o.code, reason: `${o.status}: ${o.reason}` }) };
+  }
+
+  async function runStep(step: LiveMandateStep, m: ReturnType<typeof parseMandate>, mandateHash: Hex, prev?: Promise<StepResult>): Promise<StepResult> {
+    if (prev) {
+      const before = await prev;
+      if (!before.tx.ok) return refused(step, "out of order", `The previous step failed (${before.tx.code}); nothing was sent`);
+    }
+    const st = await status();
+    if (!st.available || !st.escrow) return refused(step, "live unavailable", st.reason ?? "Live is unavailable");
+    const escrow = st.escrow as Hex;
+    const k = await liveKeys();
+    const owner = k.roles.owner.account;
+    const limits = mandateLimits(m, config.uqorPerUsd, clock.now());
+    if (limits.windowBlocks < 1) return refused(step, "mandate expired", "The mandate expires before a window could open; nothing was sent");
+
+    // Tickets used so far (D-29). Read before the first broadcast, and again for setMandate.
+    let used: number | undefined;
+    if (step === "link" || step === "mandate") {
+      if (config.deployBlock === undefined) {
+        return refused(step, "ticket count unknown", "FLIGHT_ESCROW_DEPLOY_BLOCK is not set, so the tickets already used cannot be counted; nothing was sent");
       }
-      return cached.result;
-    },
-  };
+      try {
+        used = await countUsedTickets(chain, escrow, config.deployBlock, owner.evm);
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err);
+        return refused(step, "ticket count unknown", `Could not read Booked/Refunded logs (${why}), so the tickets already used are unknown; nothing was sent`);
+      }
+    }
+
+    const opts = { timeoutMs: STEP_TIMEOUT_MS };
+    switch (step) {
+      case "link": {
+        let alreadyLinked: boolean;
+        try {
+          const agentKey = k.roles.agent.signer.address.slice(2).toLowerCase();
+          alreadyLinked = (await chain.linkedKeys(owner.cosmos)).some((l) => l.pubkeyHex === agentKey && !l.revoked);
+        } catch (err) {
+          return refused(step, "rpc error", `Could not read the owner's linked keys: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        const msgs = linkMsgs({ owner: owner.cosmos, chainId: config.network.chainId, agentSigner: k.roles.agent.signer, escrow, limits, alreadyLinked });
+        const fields = alreadyLinked
+          ? { label: "Update spending rule (agent key already linked)", msg: "MsgUpdateSpendingRules" }
+          : STEP_TEXT.link;
+        return fromOutcome(fields, await chain.sendCosmos("owner", msgs, opts));
+      }
+      case "window":
+        return fromOutcome(STEP_TEXT.window, await chain.sendCosmos("owner", [windowMsg({ owner: owner.cosmos, escrow, maxTickets: m.maxTickets, limits })], opts));
+      case "mandate": {
+        const mandate = onchainMandate(m, { merchant: k.roles.merchant.account.evm, used: used!, uqorPerUsd: config.uqorPerUsd, mandateHash });
+        // agent = the owner account's 0x address: book()'s msg.sender on the authenticator lane (ADR-0002).
+        const data = setMandateData(owner.evm, mandate);
+        return fromOutcome(STEP_TEXT.mandate, await chain.sendEvm("owner", { to: escrow, data, errorAbi: FLIGHT_ESCROW_ABI }, opts));
+      }
+    }
+  }
+
+  async function setupMandate(input: SetupMandateInput): Promise<ChainTx> {
+    const step = input.step;
+    if (typeof step !== "string" || !(LIVE_MANDATE_STEPS as readonly string[]).includes(step)) {
+      throw new BadRequest(`step must be one of ${LIVE_MANDATE_STEPS.join(", ")}`);
+    }
+    const s = step as LiveMandateStep;
+    const m = parseMandate(input.mandate);
+    const hash = parseMandateHash(input.mandateHash);
+    const canonical = canonicalJson(m);
+
+    let session = sessions.get(hash);
+    if (session && session.canonical !== canonical) {
+      return refused(s, "mandate mismatch", "This mandate hash was already used with a different mandate; nothing was sent").tx;
+    }
+    const existing = session?.steps.get(s);
+    if (existing) return (await existing).tx;
+
+    const i = LIVE_MANDATE_STEPS.indexOf(s);
+    const prev = i > 0 ? session?.steps.get(LIVE_MANDATE_STEPS[i - 1]) : undefined;
+    if (i > 0 && !prev) {
+      return refused(s, "out of order", `Send "${LIVE_MANDATE_STEPS[i - 1]}" first; nothing was sent`).tx;
+    }
+    if (!session) {
+      session = { canonical, steps: new Map() };
+      sessions.set(hash, session);
+    }
+    // Sends never throw (ServerChain contract), so an exception is unexpected: keep it like a
+    // failed broadcast rather than risk sending twice.
+    const run = runStep(s, m, hash, prev).catch((err): StepResult => ({
+      ...refused(s, "internal error", err instanceof Error ? err.message : String(err)),
+      broadcast: true,
+    }));
+    session.steps.set(s, run);
+    const result = await run;
+    // Only results of a broadcast are kept: a refusal before sending may be tried again.
+    if (!result.broadcast && session.steps.get(s) === run) session.steps.delete(s);
+    return result.tx;
+  }
+
+  return { status, setupMandate };
 }
+
+type TxFields = Pick<ChainTx, "ok" | "hash"> & Partial<Pick<ChainTx, "code" | "reason" | "lane" | "explorerUrl">>;
+/** A step's tx, and whether anything was broadcast for it (only those are kept for idempotency). */
+type StepResult = { broadcast: boolean; tx: ChainTx };
+
+const STEP_TEXT: Record<LiveMandateStep, Pick<ChainTx, "label" | "msg">> = {
+  link: { label: "Link agent key + spending rule", msg: "MsgUpdateSpendingRules + MsgRegisterAuthenticator" },
+  window: { label: "Open scoped window", msg: "MsgOpenEVMWindow" },
+  mandate: { label: "Write mandate on-chain", msg: "FlightEscrow.setMandate()" },
+};
 

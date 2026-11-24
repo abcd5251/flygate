@@ -92,6 +92,8 @@ export type ChainTx = {
   kind: TxKind;
   ok: boolean;
   code?: string;
+  /** Why a live tx failed (or was refused before sending), for the presenter. */
+  reason?: string;
   at: number;
   source: TxSource;
   explorerUrl?: string;
@@ -106,6 +108,8 @@ export type SignedMandate = {
   signMs: number;
   signedAt: number;
   agentAddress: string;
+  /** The mode it was signed in: a simulated mandate never drives live txs (D-25). */
+  mode: DemoMode;
 };
 
 export type StepStatus = "pending" | "running" | "done" | "failed" | "skipped";

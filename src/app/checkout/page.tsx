@@ -41,8 +41,11 @@ export default function CheckoutPage() {
     patchBooking((b) => ({ ...b, steps: b.steps.map((st) => (st.key === key ? { ...st, ...patch } : st)) }));
   }
 
+  // A mandate signed in the other mode never drives this mode's chain steps (D-25).
+  const modeMismatch = !!state.signed && (state.signed.mode ?? "simulated") !== state.mode;
+
   useEffect(() => {
-    if (!ready || !booking || booking.status !== "running" || !offer) return;
+    if (!ready || !booking || booking.status !== "running" || !offer || modeMismatch) return;
     let cancelled = false;
     const chain = getChain(latest().mode);
 
@@ -197,7 +200,7 @@ export default function CheckoutPage() {
     };
     // Restart the runner only when a different booking starts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, booking?.offerId, booking?.status === "running"]);
+  }, [ready, booking?.offerId, booking?.status === "running", modeMismatch]);
 
   useEffect(() => {
     if (booking?.status !== "succeeded" || stay) return;
@@ -206,6 +209,20 @@ export default function CheckoutPage() {
   }, [booking?.status, stay, router]);
 
   if (!ready) return null;
+  if (modeMismatch) {
+    const label = state.mode === "live" ? "Live" : "Simulated";
+    return (
+      <>
+        <FlowBand current={3} title="Gate check" />
+        <EmptyState
+          title={`Re-sign your mandate in ${label} mode`}
+          body={`Your mandate was signed in ${state.mode === "live" ? "Simulated" : "Live"} mode. Sign it again before the agent books in ${label} mode.`}
+          href="/mandate"
+          cta="Sign the mandate again"
+        />
+      </>
+    );
+  }
   if (!booking || !offer || !state.signed) {
     return (
       <>

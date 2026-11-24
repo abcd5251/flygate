@@ -60,9 +60,16 @@ export function sleep(ms: number) {
 
 export const STARTING_BALANCE_USD = 1000;
 
-/** The three owner transactions the wallet sends after the mandate is signed, in order. */
-export type MandateTxStep = "link" | "spending" | "window";
-export const MANDATE_TX_STEPS: MandateTxStep[] = ["link", "spending", "window"];
+/**
+ * The owner transactions the wallet sends after the mandate is signed, in order. Simulated keeps
+ * its original three; Live sends link (key + spending rule in one tx), the Scoped window, then
+ * setMandate (D-12).
+ */
+export type MandateTxStep = "link" | "spending" | "window" | "mandate";
+export const MANDATE_TX_STEPS: Record<DemoMode, MandateTxStep[]> = {
+  simulated: ["link", "spending", "window"],
+  live: ["link", "window", "mandate"],
+};
 
 export type MandateChainInput = { step: MandateTxStep; mandate: Mandate; mandateHash?: string };
 export type BookingChainInput = { offerId: string; amountUsd: number };
@@ -107,6 +114,7 @@ const SIMULATED_MANDATE_TXS: Record<MandateTxStep, readonly [label: string, msg:
   link: ["Link agent key", "MsgRegisterAuthenticator"],
   spending: ["Set spending rules", "MsgUpdateSpendingRules"],
   window: ["Open scoped window", "MsgOpenEVMWindow"],
+  mandate: ["Write mandate on-chain", "FlightEscrow.setMandate()"],
 };
 
 export const simulatedChain: ChainPort = {
@@ -139,6 +147,11 @@ function notYetLive(op: string): never {
   throw new Error(`Live ${op} is not available yet`);
 }
 
+/** A live step that failed before the server could answer: no hash, no "Live tx" label. */
+function liveFailure(reason: string, code: string): ChainTx {
+  return { id: `live_${Date.now()}`, label: "Live request failed", msg: "", hash: "", kind: "owner", ok: false, code, reason, at: Date.now(), source: "live" };
+}
+
 /** What the browser shows when /api/live/status cannot be reached or answers 404. */
 function unavailable(reason: string): ChainStatus {
   return { available: false, reason, explorer: CHAIN.explorer };
@@ -149,8 +162,24 @@ function unavailable(reason: string): ChainStatus {
  * diana (ADR-0001). The browser never sees keys or the SDK, only public results.
  */
 export const liveChain: ChainPort = {
-  async setupMandate() {
-    return notYetLive("setupMandate");
+  async setupMandate({ step, mandate, mandateHash }) {
+    let res: Response;
+    try {
+      res = await fetch("/api/live/mandate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ step, mandate, mandateHash }),
+        cache: "no-store",
+      });
+    } catch {
+      return liveFailure("Live server unreachable", "rpc error");
+    }
+    if (res.status === 404) return liveFailure("LIVE_MODE is not on", "live unavailable");
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      return liveFailure(body.error ?? `HTTP ${res.status}`, `http ${res.status}`);
+    }
+    return (await res.json()) as ChainTx;
   },
   async lockFunds() {
     return notYetLive("lockFunds");

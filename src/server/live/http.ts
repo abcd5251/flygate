@@ -1,5 +1,6 @@
 import "server-only";
 import type { Env } from "./config";
+import { BadRequest } from "./mandate";
 import type { LiveService } from "./service";
 
 /** Every Live route answers 404 unless the server runs with LIVE_MODE=on (D-08). */
@@ -17,4 +18,26 @@ const NO_STORE = { "cache-control": "no-store" };
 export async function handleLiveStatus(env: Env, getService: () => LiveService): Promise<Response> {
   if (!liveEnabled(env)) return notFound();
   return Response.json(await getService().status(), { headers: NO_STORE });
+}
+
+/**
+ * POST /api/live/mandate with `{ step, mandate, mandateHash }`. Only those structured fields are
+ * read; the server builds every message and calldata itself (D-08). 400 for malformed input.
+ */
+export async function handleLiveMandate(env: Env, getService: () => LiveService, request: Request): Promise<Response> {
+  if (!liveEnabled(env)) return notFound();
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "Body must be JSON" }, { status: 400, headers: NO_STORE });
+  }
+  if (typeof body !== "object" || body === null) return Response.json({ error: "Body must be an object" }, { status: 400, headers: NO_STORE });
+  const { step, mandate, mandateHash } = body as Record<string, unknown>;
+  try {
+    return Response.json(await getService().setupMandate({ step, mandate, mandateHash }), { headers: NO_STORE });
+  } catch (err) {
+    if (err instanceof BadRequest) return Response.json({ error: err.message }, { status: 400, headers: NO_STORE });
+    throw err;
+  }
 }

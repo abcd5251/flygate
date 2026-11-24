@@ -1,58 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { derivePqcCanonical } from "@qorechain/sdk";
-import { deriveEvmRole } from "../../../scripts/evm/keys";
 import { readLiveConfig, type Env } from "./config";
 import { FakeChain } from "./fake-chain";
 import { handleLiveStatus } from "./http";
 import { createLiveService, STATUS_TTL_MS } from "./service";
 import { usdToUqor } from "./money";
-
-// Public test mnemonics (BIP-39 vectors / Foundry default). Never real keys.
-const MNEMONICS = {
-  OWNER_MNEMONIC: "test test test test test test test test test test test junk",
-  AGENT_MNEMONIC: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-  MERCHANT_MNEMONIC: "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong",
-};
-const ESCROW = "0x1111111111111111111111111111111111111111";
-const QOR = BigInt(1_000_000);
-
-const roles = Promise.all([
-  deriveEvmRole("owner", MNEMONICS.OWNER_MNEMONIC),
-  deriveEvmRole("agent", MNEMONICS.AGENT_MNEMONIC),
-  deriveEvmRole("merchant", MNEMONICS.MERCHANT_MNEMONIC),
-]).then(([owner, agent, merchant]) => ({
-  owner,
-  agent,
-  merchant,
-  merchantPqc: derivePqcCanonical(merchant.account.cosmos, MNEMONICS.MERCHANT_MNEMONIC),
-}));
-
-function env(overrides: Env = {}): Env {
-  return { LIVE_MODE: "on", ...MNEMONICS, FLIGHT_ESCROW_ADDRESS: ESCROW, FLIGHT_ESCROW_DEPLOY_BLOCK: "100", ...overrides };
-}
-
-/** A diana where everything Live needs is in place. */
-async function healthyChain(): Promise<FakeChain> {
-  const r = await roles;
-  return new FakeChain({
-    chainId: 9800,
-    code: { [ESCROW]: "0x6080604052" },
-    pqc: {
-      [r.merchant.account.evm.toLowerCase()]: {
-        registered: true,
-        algorithmId: 1,
-        pubkey: r.merchantPqc.publicKey,
-        possessionProven: true,
-      },
-    },
-    bank: { [r.owner.account.cosmos]: BigInt(60) * QOR, [r.agent.account.cosmos]: BigInt(20) * QOR },
-    evm: {
-      [r.owner.signer.address.toLowerCase()]: BigInt(10) ** BigInt(18),
-      [r.agent.signer.address.toLowerCase()]: BigInt(10) ** BigInt(18),
-    },
-  });
-}
+import { env, ESCROW, healthyChain, MNEMONICS, QOR, roles } from "./test-fixtures";
 
 function service(chain: FakeChain, e: Env = env(), now = () => 1_000_000) {
   return createLiveService({ chain, config: readLiveConfig(e), clock: { now } });
@@ -237,7 +191,12 @@ test("no response ever contains key material", async () => {
     await statusOf(await healthyChain(), env({ FLIGHT_ESCROW_ADDRESS: undefined })),
   ];
   for (const status of results) {
-    const body = await (await handleLiveStatus(env(), () => ({ status: async () => status }))).text();
+    const body = await (await handleLiveStatus(env(), () => ({
+      status: async () => status,
+      setupMandate: async () => {
+        throw new Error("not used");
+      },
+    }))).text();
     for (const s of secrets) assert.ok(!body.toLowerCase().includes(s.toLowerCase()), "response leaks key material");
     assert.ok(!/privateKey|secretKey/i.test(body));
   }

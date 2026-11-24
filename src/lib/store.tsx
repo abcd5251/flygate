@@ -65,12 +65,14 @@ function initialState(): DemoState {
 
 /**
  * Fills defaults for fields older saved sessions lack: top-level fields from `initialState()`,
- * and `source` on chain txs (everything saved before Live mode existed was simulated).
+ * and `source` on chain txs and `mode` on the signed mandate (everything saved before Live mode
+ * existed was simulated).
  */
 function restoreState(saved: Partial<DemoState>): DemoState {
   const base = { ...initialState(), ...saved };
   return {
     ...base,
+    signed: base.signed ? { ...base.signed, mode: base.signed.mode ?? "simulated" } : undefined,
     txs: (Array.isArray(base.txs) ? base.txs : []).map((t) => ({ ...t, source: t.source ?? "simulated" })),
   };
 }

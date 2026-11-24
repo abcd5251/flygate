@@ -4,9 +4,12 @@ import {
   concat,
   encodeAbiParameters,
   hexToBytes,
+  encodeFunctionData,
   keccak256,
+  parseAbi,
   stringToBytes,
   stringToHex,
+  toFunctionSelector,
   type Address,
   type Hex,
 } from "viem";
@@ -52,6 +55,21 @@ export type Quote = {
   refundable: boolean;
   expiresAt: bigint; // unix seconds (uint64)
   ticketWindow: number; // seconds (uint32)
+};
+
+/** Mirrors FlightEscrow.Mandate: what `setMandate(agent, mandate)` stores for an agent. */
+export type OnchainMandate = {
+  merchant: Address;
+  maxFareWei: bigint;
+  maxTickets: number; // uint32
+  expiresAt: bigint; // unix seconds (uint64)
+  origin: CityCode;
+  destination: CityCode;
+  departFrom: number; // unix day (uint32), inclusive
+  departTo: number; // unix day (uint32), inclusive
+  cabin: Cabin;
+  refundableOnly: boolean;
+  mandateHash: Hex; // bytes32
 };
 
 export type TicketProof = {
@@ -105,6 +123,74 @@ const cancelAbi = [
   },
 ] as const;
 
+const QUOTE_TUPLE = "(address merchant, address agent, bytes32 offerId, uint256 priceWei, bytes3 origin, bytes3 destination, uint32 departDay, uint8 cabin, bool refundable, uint64 expiresAt, uint32 ticketWindow)";
+const MANDATE_TUPLE = "(address merchant, uint256 maxFareWei, uint32 maxTickets, uint64 expiresAt, bytes3 origin, bytes3 destination, uint32 departFrom, uint32 departTo, uint8 cabin, bool refundableOnly, bytes32 mandateHash)";
+
+/** The FlightEscrow functions, events and errors the Live lane calls, reads or decodes. */
+export const FLIGHT_ESCROW_ABI = parseAbi([
+  `function setMandate(address agent, ${MANDATE_TUPLE} mandate)`,
+  "function revokeMandate(address agent)",
+  `function book(${QUOTE_TUPLE} quote, bytes signature) payable returns (bytes32 bookingId)`,
+  "function confirmTicket((bytes32 bookingId, bytes32 pnrHash, uint64 issuedAt) proof, bytes signature)",
+  "function cancel((bytes32 bookingId, uint8 reasonCode) proof, bytes signature)",
+  "function refund(bytes32 bookingId)",
+  "event MandateSet(address indexed owner, address indexed agent, address indexed merchant, bytes32 mandateHash)",
+  "event Booked(bytes32 indexed bookingId, address indexed agent, address indexed merchant, uint256 priceWei, uint64 deadline)",
+  "event Released(bytes32 indexed bookingId, bytes32 pnrHash)",
+  "event Refunded(bytes32 indexed bookingId, uint8 reason)",
+  "error WrongChain(uint256 chainId)",
+  "error NotMandateOwner()",
+  "error NoMandate()",
+  "error MerchantMismatch()",
+  "error AgentMismatch()",
+  "error WrongPayment(uint256 expected, uint256 actual)",
+  "error BookingExists(bytes32 bookingId)",
+  "error NotLocked(bytes32 bookingId)",
+  "error TicketDeadlinePassed(bytes32 bookingId)",
+  "error MerchantKeyNotRegistered(address merchant)",
+  "error UnsupportedKeyAlgorithm(uint8 algorithmId)",
+  "error MerchantKeyPossessionUnproven(address merchant)",
+  "error InvalidSignature()",
+  "error TransferFailed()",
+  "error TicketDeadlineNotPassed(bytes32 bookingId)",
+  "error TicketQuotaExhausted(uint32 maxTickets)",
+  "error MandateIsRevoked()",
+  "error MandateExpired()",
+  "error FareOverCap(uint256 maxFareWei, uint256 priceWei)",
+  "error RouteMismatch()",
+  "error DepartDayOutOfRange(uint32 departDay)",
+  "error CabinMismatch()",
+  "error RefundableRequired()",
+  "error QuoteExpired()",
+  "error InvalidTicketWindow(uint32 ticketWindow)",
+]);
+
+/** 4-byte selectors, as `allowedEvmCalls` and the contract's dispatcher see them. */
+export const SELECTORS = {
+  setMandate: toFunctionSelector(FLIGHT_ESCROW_ABI[0]),
+  revokeMandate: toFunctionSelector(FLIGHT_ESCROW_ABI[1]),
+  book: toFunctionSelector(FLIGHT_ESCROW_ABI[2]),
+  confirmTicket: toFunctionSelector(FLIGHT_ESCROW_ABI[3]),
+  cancel: toFunctionSelector(FLIGHT_ESCROW_ABI[4]),
+  refund: toFunctionSelector(FLIGHT_ESCROW_ABI[5]),
+} as const;
+
+/** Event topic0s, for eth_getLogs. */
+export const EVENT_TOPICS = {
+  MandateSet: keccak256(stringToBytes("MandateSet(address,address,address,bytes32)")),
+  Booked: keccak256(stringToBytes("Booked(bytes32,address,address,uint256,uint64)")),
+  Released: keccak256(stringToBytes("Released(bytes32,bytes32)")),
+  Refunded: keccak256(stringToBytes("Refunded(bytes32,uint8)")),
+} as const;
+
+/** The unix day (timestamp / 1 days) of a YYYY-MM-DD date at UTC midnight. */
+export function unixDay(isoDate: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) throw new Error(`not a YYYY-MM-DD date: ${isoDate}`);
+  const ms = Date.parse(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(ms)) throw new Error(`not a date: ${isoDate}`);
+  return ms / 86_400_000;
+}
+
 function cityCode(code: CityCode): Hex {
   if (!/^[A-Z]{3}$/.test(code)) throw new Error(`city code must be 3 uppercase letters: ${code}`);
   return stringToHex(code, { size: 3 });
@@ -115,6 +201,15 @@ export function encodeQuote(q: Quote): Hex {
   return encodeAbiParameters(quoteAbi, [
     { ...q, origin: cityCode(q.origin), destination: cityCode(q.destination) },
   ]);
+}
+
+/** Calldata of `setMandate(agent, mandate)`. */
+export function encodeSetMandate(agent: Address, m: OnchainMandate): Hex {
+  return encodeFunctionData({
+    abi: FLIGHT_ESCROW_ABI,
+    functionName: "setMandate",
+    args: [agent, { ...m, origin: cityCode(m.origin), destination: cityCode(m.destination) }],
+  });
 }
 
 /** abi.encode(proof), as Solidity encodes a FlightEscrow.TicketProof. */
