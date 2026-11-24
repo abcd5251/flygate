@@ -148,6 +148,8 @@ contract FlightEscrow {
     error MerchantKeyPossessionUnproven(address merchant);
     error InvalidSignature();
     error TransferFailed();
+    error TicketDeadlineNotPassed(bytes32 bookingId);
+    error TicketQuotaExhausted(uint32 maxTickets);
 
     constructor() {
         if (block.chainid != DIANA_CHAIN_ID) revert WrongChain(block.chainid);
@@ -183,6 +185,7 @@ contract FlightEscrow {
         _verifyMerchant(quote.merchant, QUOTE_TYPE, abi.encode(quote), signature);
 
         uint64 deadline = uint64(block.timestamp) + quote.ticketWindow;
+        if (m.ticketsUsed >= m.mandate.maxTickets) revert TicketQuotaExhausted(m.mandate.maxTickets);
         m.ticketsUsed += 1;
         bookings[bookingId] = Booking({
             status: Status.Locked,
@@ -209,7 +212,38 @@ contract FlightEscrow {
         _send(b.merchant, b.priceWei);
     }
 
+    // -------------------------------------------------------------------- refunds
+
+    /// @notice Refund a locked booking to its owner against a merchant-signed cancel proof.
+    ///         Callable by anyone, any time while Locked.
+    function cancel(CancelProof calldata proof, bytes calldata signature) external {
+        Booking storage b = bookings[proof.bookingId];
+        if (b.status != Status.Locked) revert NotLocked(proof.bookingId);
+
+        _verifyMerchant(b.merchant, CANCEL_TYPE, abi.encode(proof), signature);
+
+        _refund(proof.bookingId, b, RefundReason.Cancelled);
+    }
+
+    /// @notice Refund a locked booking to its owner once the ticketing deadline has passed.
+    ///         Callable by anyone; the money always goes to the owner.
+    function refund(bytes32 bookingId) external {
+        Booking storage b = bookings[bookingId];
+        if (b.status != Status.Locked) revert NotLocked(bookingId);
+        if (block.timestamp <= b.deadline) revert TicketDeadlineNotPassed(bookingId);
+
+        _refund(bookingId, b, RefundReason.Expired);
+    }
+
     // ------------------------------------------------------------------ internals
+
+    /// @dev Locked -> Refunded: pay the owner back and return one unit of the agent's quota.
+    function _refund(bytes32 bookingId, Booking storage b, RefundReason reason) internal {
+        b.status = Status.Refunded;
+        mandates[b.agent].ticketsUsed -= 1;
+        emit Refunded(bookingId, reason);
+        _send(b.owner, b.priceWei);
+    }
 
     function _verifyMerchant(address merchant, bytes32 typeTag, bytes memory encodedStruct, bytes calldata signature)
         internal
