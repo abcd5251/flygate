@@ -152,6 +152,25 @@ QoreChain 規定 agent 必須真的在鏈上動作，所以要按這個順序把
 | PQC 狀態查詢 | REST `GET {rest}/qorechain/pqc/v1/account/{address}`（SDK `fetchPqcStatus`）；公開端點不提供 `qor_*` JSON-RPC |
 | EVM 端的帳號 | bootstrap 帳號（coin 118）在 EVM 端就是 qor1 那 20 bytes 的 hex：餘額相同，`pqcKeyStatus`（eth_call 0x…0A02）也查得到它的 ML-DSA-87 金鑰。但沒有 EVM 私鑰能從這個地址送交易（EVM 送件人是 keccak(pubkey)）。所以每個角色有兩個 EVM 地址：account（商家地址、收款、查金鑰用）與 signer（同一組助記詞的 coin-60 金鑰，送 deploy／setMandate／book 用，要另外補款）。`pnpm evm:check` 唯讀檢查，`scripts/evm/` 提供 helper |
 
+**live-checkout 依賴的鏈上行為（#17，`pnpm live:probe`）：**
+
+spec §4.3 依賴、還沒驗證過的六件事，由 `pnpm live:probe` 在 diana 上用小額真交易和一份臨時部署的 `ProbeRecorder`（`contracts/probe/`，記錄 `msg.sender`、`msg.value` 與 selector）逐項確認。腳本跑完會把結論、交易雜湊與 explorer 連結寫進下方標記之間；結果推翻決策時，另外產生一則給 #16 的留言。以探測為準，不以 spec 為準。
+
+跑法：先 `pnpm bootstrap`（三個帳號、ML-DSA-87 已註冊、owner 有餘額），再 `pnpm live:probe`（會先列出要送的交易並要求確認；第 5 項會請你打開 explorer 連結回答 y/n）。廣播一律不重試，只有讀取會重試。
+
+<!-- live:probe:start -->
+**尚未實測。** 以下六項都還沒有在 diana 上跑過 `pnpm live:probe`：
+
+| # | 項目 | 結論 |
+|---|---|---|
+| 1 | MsgExecuteEVM（Linked agent key）的 msg.sender 是 owner 帳號 0x，msg.value 從 owner 帳號出 | 未實測 |
+| 2 | coin-60 signer 送一般 EVM 交易的前置條件（PQC 註冊、Scoped window） | 未實測 |
+| 3 | 帶 selector 的 allowedEvmCalls 放行指定函式、擋下其他函式 | 未實測 |
+| 4 | window 管得到 MsgExecuteEVM | 未實測 |
+| 5 | explorer 認 0x EVM 交易雜湊 | 未實測 |
+| 6 | derivePqcCanonical 商家金鑰經共用 escrow 模組簽的 ML-DSA-87 簽章能被鏈上公鑰驗過 | 未實測 |
+<!-- live:probe:end -->
+
 ## 檔案地圖
 
 ```
