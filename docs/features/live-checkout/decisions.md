@@ -40,7 +40,7 @@
 - 考慮過的其他選項：等 #14 完成才開工（會卡住整條 pipeline）；自己先部署一份合約（會和 #14 搶部署，留下兩個地址）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec 開頭（相依與交付）、spec §1、spec §2、spec §4.1、spec §5、spec §7
+- 影響到：spec 開頭（相依與交付）、spec §1、spec §2、spec §4.1、spec §5、spec §7、#26
 
 ### D-02 Live 模式從哪裡讀合約地址？缺地址時怎麼辦？
 - 分支：範圍與相依 > 合約地址
@@ -51,7 +51,7 @@
 - 考慮過的其他選項：讀 #14 產生的部署紀錄檔（格式還沒定）；寫死在 `chain.ts`（需要改程式碼才能換地址，而且會和 #14 衝突，見 D-03）；`NEXT_PUBLIC_` 變數（地址本身是公開資料，但不能在執行期更換）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §2、spec §3、spec §4.1、spec §4.8
+- 影響到：spec §2、spec §3、spec §4.1、spec §4.8、#19
 
 ### D-03 #14 的範圍也包含「換掉 `ADDRESSES.escrow`、把 release 步驟改成對應 `confirmTicket` 裡的 `Released` 事件」，和本功能要改的 `chain.ts`／`booking.ts` 重疊，怎麼分工？
 - 分支：範圍與相依 > 與 flight-escrow 的重疊
@@ -62,7 +62,7 @@
 - 考慮過的其他選項：本功能直接接手 #14 的前端小改動（會改到別人的驗收項目）；等 #14 合併後再改文字（拖慢本功能）
 - 衝突：與 flight-escrow（issue #14，尚未登錄在 DECISIONS-INDEX）的前端改動範圍重疊
 - 狀態：有效
-- 影響到：spec 開頭（相依與交付）、spec §4.1、spec §6、spec §7
+- 影響到：spec 開頭（相依與交付）、spec §4.1、spec §6、spec §7、#18
 
 ### D-04 PR #8 和 `feat/flight-escrow` 都還沒合併，`ticket/13-evm-keys` 的 EVM 金鑰 helper 也還沒併進 `feat/flight-escrow`。本功能怎麼處理這些相依？
 - 分支：範圍與相依 > 未合併分支
@@ -73,7 +73,7 @@
 - 考慮過的其他選項：把 keys.ts 複製進來（之後會有兩份）；直接 merge ticket/13（會繞過 flight-escrow 的整合）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec 開頭（相依與交付）、spec §4.1
+- 影響到：spec 開頭（相依與交付）、spec §4.1、#17、#19
 
 ### D-05 Live 模式的鏈上交易要在哪裡簽：瀏覽器、Next.js 伺服器的 route，還是腳本？
 - 分支：簽章與金鑰位置 > 簽章位置
@@ -84,7 +84,7 @@
 - 考慮過的其他選項：owner 在瀏覽器用助記詞簽（等於把助記詞送進瀏覽器，否決）；接真正的 QoreX 錢包（目前沒有整合，範圍太大）；先用腳本跑完，畫面只顯示事先錄好的雜湊（就不是 Live 了，否決）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §1、spec §2、spec §3、spec §4.2
+- 影響到：spec §1、spec §2、spec §3、spec §4.2、#19
 
 ### D-06 Live 模式下沒有真錢包，owner 的「Sign with QoreX」實際上由誰簽？畫面要怎麼誠實標示？
 - 分支：簽章與金鑰位置 > owner 簽章
@@ -95,7 +95,7 @@
 - 考慮過的其他選項：Live 模式跳過 owner 的鏈上步驟，只讓 agent 送交易（做不到需求裡的授權階段）；把標章拿掉（不誠實）；請 presenter 在終端機手動跑一支腳本（打斷 Demo）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §1、spec §2、spec §3、spec §4.2、spec §4.7、spec §7
+- 影響到：spec §1、spec §2、spec §3、spec §4.2、spec §4.7、spec §7、#20
 
 ### D-07 用什麼機制確保私鑰和助記詞不會進到瀏覽器 bundle 或 git？
 - 分支：簽章與金鑰位置 > 防外洩
@@ -106,7 +106,7 @@
 - 考慮過的其他選項：只靠變數不加 `NEXT_PUBLIC_`（只要有人在 client 端 import 就破功）；React taint API（還是 experimental）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.2、spec §4.10、spec §5
+- 影響到：spec §3、spec §4.2、spec §4.10、spec §5、#19
 
 ### D-08 會代簽交易的 Live routes，被當成任何人都能用的「簽章服務」怎麼辦？
 - 分支：簽章與金鑰位置 > 濫用防護
@@ -117,7 +117,7 @@
 - 考慮過的其他選項：加 API token（presenter 要多管一個秘密）；只檢查 localhost 的 Host 標頭（容易被繞過）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.2、spec §4.10、spec §6、spec §7
+- 影響到：spec §3、spec §4.2、spec §4.10、spec §6、spec §7、#19
 
 ### D-09 鎖款 `FlightEscrow.book()` 走哪一條送件路徑？誰簽、誰付手續費、錢從哪個帳號出？
 - 分支：帳號拓樸與 lane > book 的路徑
@@ -133,7 +133,7 @@
 - 考慮過的其他選項：agent 的 coin-60 EOA 直接送 EVM 交易（#14 e2e 的路徑，錢會從 agent 出而不是 owner，而且沒有用到需求指定的 `MsgExecuteEVM`，所以留作退路，見 D-11）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §2、spec §3、spec §4.3
+- 影響到：spec §2、spec §3、spec §4.3、#17、#20、#21
 
 ### D-10 合約把退款付給 `setMandate` 的呼叫者，但 owner 帳號的 0x 地址沒有 EVM 私鑰能簽（#13 的發現）。那 `setMandate` 由誰送、錢退到哪裡？
 - 分支：帳號拓樸與 lane > mandate 與退款去向
@@ -149,7 +149,7 @@
 - 考慮過的其他選項：改合約，退款改付給下單的付款人（屬於 #7 的範圍，而且合約已經完成測試）；owner 另外綁一把自己的 key，透過 `MsgExecuteEVM` 送 `setMandate`（支出規則是整個帳號共用，agent 也會因此能呼叫 `setMandate`、自己調高上限，否決）；整個改走 EOA lane（D-11 的退路）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.3、spec §4.4、spec §7
+- 影響到：spec §3、spec §4.3、spec §4.4、spec §7、#17、#20、#23、#25
 
 ### D-11 D-09 和 D-10 依賴的鏈上行為都還沒驗證過（`MsgExecuteEVM` 的 `msg.sender` 是誰、coin-60 signer 送 EVM 交易前是否也要註冊 PQC 並開 window、`allowedEvmCalls` 能不能限制到函式 selector）。怎麼降低風險？
 - 分支：帳號拓樸與 lane > 未驗證的事實
@@ -166,7 +166,7 @@
 - 考慮過的其他選項：直接照 D-09 寫完再上鏈除錯（失敗成本會落在 Demo 前夕）；只做 EOA lane（不符合需求）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.3、spec §5、spec §7
+- 影響到：spec §3、spec §4.3、spec §5、spec §7、#17、#21、#26
 
 ### D-12 `openEvmWindowMsg` 的 window 開在誰身上？範圍怎麼設？和其他交易的先後順序？
 - 分支：帳號拓樸與 lane > scoped window
@@ -185,7 +185,7 @@
 - 考慮過的其他選項：window 開在 owner 的 EVM signer 身上，只為了放行 `setMandate`（要等 D-11 探測結果才知道需不需要，探測可能改成這個做法）；`blocks` 開到上限 17,280（約 5 小時，範圍太寬）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §2、spec §3、spec §4.4
+- 影響到：spec §2、spec §3、spec §4.4、#17、#20
 
 ### D-13 `linkAuthenticatorMsgs` 的支出規則和權限參數要怎麼設？
 - 分支：帳號拓樸與 lane > 支出規則
@@ -205,7 +205,7 @@
 - 考慮過的其他選項：只放行整個合約 `0x<escrow>`（agent 就能呼叫 `setMandate`，否決）；`permissions = ["all"]`（範圍太大）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §2、spec §3、spec §4.4
+- 影響到：spec §2、spec §3、spec §4.4、#17、#20
 
 ### D-14 Live 模式下，US$ 票價要換算成多少 QOR？
 - 分支：金額單位與資料對應 > 換算比例
@@ -216,7 +216,7 @@
 - 考慮過的其他選項：沿用 1:1（餘額不夠）；把 Demo 票價改成 US$3.89（畫面會不像真的訂票網站）；多領幾天水龍頭（還是不夠，而且要手動登入）
 - 衝突：與 flight-escrow（issue #7 Implementation Decisions「1 QOR shown as US$1」，尚未登錄在 DECISIONS-INDEX）不一致。#7 的慣例只用在它自己的 e2e 腳本，本功能只在 Live 畫面上換算，不改合約
 - 狀態：有效
-- 影響到：spec §3、spec §4.5、spec §7
+- 影響到：spec §3、spec §4.5、spec §7、#20、#21
 
 ### D-15 Demo 的 Offer 和 Mandate 要怎麼對應到合約的 `Quote` 與 `Mandate` 結構？
 - 分支：金額單位與資料對應 > 結構對應
@@ -238,7 +238,7 @@
 - 考慮過的其他選項：`ticketWindow` 設 120 秒（Demo 的節奏抓太緊，驗證步驟一卡住就可能過期）；`offerId` 直接塞 ASCII（長度不固定）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.5
+- 影響到：spec §3、spec §4.5、#20、#21
 
 ### D-16 「Ticketed」情境的 8 道關卡，哪幾道會送真交易？
 - 分支：情境對應 > Ticketed
@@ -258,7 +258,7 @@
 - 考慮過的其他選項：`verify` 也送一筆交易（`pqcVerify` 是 view 函式，送交易沒有意義，還要付手續費）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §2、spec §3、spec §4.6
+- 影響到：spec §2、spec §3、spec §4.6、#21、#22、#23
 
 ### D-17 「Fare jumps」在鏈上要呈現什麼？需求說「錢沒動」。
 - 分支：情境對應 > Fare jumps
@@ -269,7 +269,7 @@
 - 考慮過的其他選項：送一筆會 revert 的 `book()` 拿到 explorer 連結（會花手續費，違反「錢沒動」）；什麼都不查（少了鏈上證據）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §2、spec §3、spec §4.6
+- 影響到：spec §2、spec §3、spec §4.6、#22
 
 ### D-18 「Booking fails」在鏈上怎麼退款？用 `refund()` 還是 `cancel()`？
 - 分支：情境對應 > Booking fails
@@ -280,7 +280,7 @@
 - 考慮過的其他選項：`refund()` 加上把 ticketWindow 設成 60 秒並等待（Demo 要乾等一分鐘）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §2、spec §3、spec §4.6
+- 影響到：spec §2、spec §3、spec §4.6、#18、#23、#25
 
 ### D-19 `confirmTicket()` 和 `cancel()` 由誰送出交易？
 - 分支：情境對應 > proof 的提交者
@@ -291,7 +291,7 @@
 - 考慮過的其他選項：商家自己的 EVM signer 送出（要另外補款，還要處理 window）；透過 `MsgExecuteEVM` 送出（`allowedEvmCalls` 只放行 `book()`，見 D-13）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.3、spec §4.6
+- 影響到：spec §3、spec §4.3、spec §4.6、#17、#21、#23
 
 ### D-20 畫面上的來源標章要怎麼分？需求說真交易的步驟不能再標「Simulated tx」。
 - 分支：畫面標籤 > 標章
@@ -308,7 +308,7 @@
 - 考慮過的其他選項：只拿掉「Simulated tx」不加新標章（評審看不出哪些是真的）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §1、spec §2、spec §3、spec §4.7
+- 影響到：spec §1、spec §2、spec §3、spec §4.7、#18
 
 ### D-21 除了標章之外，還有哪些寫死的「simulated」文字要跟著模式改？
 - 分支：畫面標籤 > 文字
@@ -325,7 +325,7 @@
 - 考慮過的其他選項：drill 也一起改成 Live（屬於 FLOW 接上順序的第 4 步，不是本功能）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.7、spec §6
+- 影響到：spec §3、spec §4.7、spec §6、#21
 
 ### D-22 `ChainTx` 和 `BookingStep` 的資料形狀要怎麼擴充？
 - 分支：畫面標籤 > 資料形狀
@@ -336,7 +336,7 @@
 - 考慮過的其他選項：把 key 升到 v2（會讓 presenter 正在進行的 Demo 狀態全部清空，沒有必要）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.7
+- 影響到：spec §3、spec §4.7、#18
 
 ### D-23 交易的 explorer 連結長什麼樣子？Cosmos 交易和 EVM 交易的雜湊格式不同怎麼辦？
 - 分支：畫面標籤 > explorer 連結
@@ -347,7 +347,7 @@
 - 考慮過的其他選項：用 SDK 的 `explorerTxUrl`（要先在 network 設定裡填 explorerUrl，效果一樣，多一層設定）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.7
+- 影響到：spec §3、spec §4.7、#17、#18
 
 ### D-24 Live／Simulated 切換鈕放在哪裡？預設哪一個？
 - 分支：切換與退回 > 位置與預設
@@ -358,7 +358,7 @@
 - 考慮過的其他選項：放在 Header 讓所有人都看得到（會干擾訂票網站的外觀）；用網址參數 `?live=1`（重新整理就不見，容易忘記）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §2、spec §3、spec §4.8
+- 影響到：spec §2、spec §3、spec §4.8、#19
 
 ### D-25 可以在流程中途切換模式嗎？已經簽好的 mandate 怎麼處理？
 - 分支：切換與退回 > 切換時機
@@ -369,7 +369,7 @@
 - 考慮過的其他選項：切換時自動補簽 Live mandate（會在 presenter 沒注意時送出交易）；Reset 時也把 mode 重設回 Simulated（presenter 容易忘記切回來）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.4、spec §4.8
+- 影響到：spec §3、spec §4.4、spec §4.8、#19、#20
 
 ### D-26 測試網出問題時，怎麼「切回模擬版，Demo 照常跑完」？錢已經鎖在合約裡的話怎麼辦？
 - 分支：切換與退回 > 退回行為
@@ -380,7 +380,7 @@
 - 考慮過的其他選項：失敗時自動無聲改成模擬（評審會以為後面的步驟也是真的）；失敗就停下來不讓 Demo 繼續（違反需求）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §1、spec §2、spec §3、spec §4.8、spec §7
+- 影響到：spec §1、spec §2、spec §3、spec §4.8、spec §7、#20、#24、#25
 
 ### D-27 `/api/live/status` 要檢查哪些東西，才判定 Live 可用？
 - 分支：切換與退回 > 可用性檢查
@@ -400,7 +400,7 @@
 - 考慮過的其他選項：只檢查合約地址（餘額不夠時，要等到 `book()` 才會失敗）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.8
+- 影響到：spec §3、spec §4.8、#19
 
 ### D-28 React StrictMode 在開發模式會讓 effect 跑兩次，再加上重新整理、重複點擊，會不會重複廣播？
 - 分支：冪等與跨回合 > 重複廣播
@@ -411,7 +411,7 @@
 - 考慮過的其他選項：只靠 client 端的旗標（StrictMode 和多個分頁都攔不住）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.9、spec §5
+- 影響到：spec §3、spec §4.9、spec §5、#20、#21、#24
 
 ### D-29 合約的 `ticketsUsed` 在重設 mandate 時會保留，也沒有查詢函式。Demo 跑第二輪時，`book()` 會因為 `TicketQuotaExhausted` 失敗，怎麼辦？
 - 分支：冪等與跨回合 > 票數額度
@@ -422,7 +422,7 @@
 - 考慮過的其他選項：請 #7 加一個 `ticketsUsed(agent)` view 函式（要改已經完成測試的合約，屬於跨功能）；每輪 Demo 換一個新的 owner 帳號（要重跑水龍頭）；把鏈上 `maxTickets` 設一個很大的數字（等於讓鏈上的張數限制失效）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.4、spec §7
+- 影響到：spec §3、spec §4.4、spec §7、#20
 
 ### D-30 Live 交易要等多久？Demo 的節奏和動畫速度怎麼維持？
 - 分支：冪等與跨回合 > 等待與節奏
@@ -433,7 +433,7 @@
 - 考慮過的其他選項：不等上鏈，廣播送出就顯示雜湊（交易之後失敗時，畫面會是錯的）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.9
+- 影響到：spec §3、spec §4.9、#20、#21、#24
 
 ### D-31 需求說要「改寫 `src/lib/chain.ts`，畫面元件盡量不改」，程式結構怎麼切？
 - 分支：程式結構 > 模組邊界
@@ -444,7 +444,7 @@
 - 考慮過的其他選項：每個頁面直接 fetch 各自的 API（模式判斷會散在各頁）；把整個 SDK 用動態 `import()` 載進瀏覽器（違反 D-05）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §4.2、spec §4.10
+- 影響到：spec §4.2、spec §4.10、#18、#19
 
 ### D-32 商家在 Live 模式用哪一把 ML-DSA-87 金鑰簽 quote 和各種 proof？
 - 分支：程式結構 > 商家金鑰
@@ -455,7 +455,7 @@
 - 考慮過的其他選項：另外設一個 `MERCHANT_MLDSA_SEED`（#13 已經明確取消這個做法）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.3、spec §4.5
+- 影響到：spec §3、spec §4.3、spec §4.5、#17、#21
 
 ### D-33 沒有可以放進 CI 的測試網，要怎麼測？
 - 分支：測試與範圍外 > 測試策略
@@ -471,7 +471,7 @@
 - 考慮過的其他選項：在本機起 anvil 測試鏈（沒有 PQC 預編譯，`book()` 跑不起來）；在 CI 打 diana（有限流，而且要水龍頭）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §3、spec §4.10、spec §5、spec §7
+- 影響到：spec §3、spec §4.10、spec §5、spec §7、#19、#26
 
 ### D-34 哪些事明確不在本功能範圍內？
 - 分支：測試與範圍外 > 範圍外
@@ -489,4 +489,4 @@
 - 考慮過的其他選項：順便把 drill 的撤銷改成真的（會讓範圍變大，而且 revoke 和 relink 的流程要另外設計）
 - 衝突：無
 - 狀態：有效
-- 影響到：spec §6
+- 影響到：spec §6、無對應 ticket（範圍外，見 spec §6）
