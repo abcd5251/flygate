@@ -107,9 +107,15 @@ export default function CheckoutPage() {
           const price = b.quotedPriceUsd ?? offer!.priceUsd;
           const v = checkOffer(offer!, m, price);
           if (!v.ok) {
-            setStep(key, { status: "failed", detail: `${v.firstFail?.detail}. The agent stopped before paying.`, at: Date.now() });
-            const cap = await chain.checkFareCap({ offerId: offer!.id, priceUsd: price, maxFareUsd: m.maxFareUsd });
+            const stopped = `${v.firstFail?.detail}. The agent stopped before paying.`;
+            setStep(key, { status: "failed", detail: stopped, at: Date.now() });
+            const cap = await chain.checkFareCap({ offerId: offer!.id, priceUsd: price, maxFareUsd: m.maxFareUsd, bookingId: b.bookingId });
             if (cap.tx) addTx(cap.tx);
+            // Live: the contract's own refusal, read with eth_call; no tx, no hash (D-17).
+            if (cap.source === "live") {
+              const onChain = cap.readResult ?? `On-chain check failed: ${cap.code ?? "error"} · ${cap.detail ?? ""}`;
+              setStep(key, { source: "live", readResult: cap.readResult, detail: `${stopped} ${onChain}` });
+            }
             update((st) => ({ ...st, scenario: "normal", booking: st.booking ? { ...st.booking, status: "blocked" } : st.booking }));
             return "stop";
           }
@@ -365,7 +371,7 @@ export default function CheckoutPage() {
                         <p className={cx("font-bold", st.status === "pending" ? "text-muted" : st.status === "failed" ? "text-block" : "text-ink")}>{meta.title}</p>
                         <Pill tone={ACTOR_TONE[actor]}>{msg?.startsWith("agent EOA") ? "Agent EOA" : ACTOR_LABEL[actor]}</Pill>
                         {st.status === "done" && realCrypto && <SourceTag kind="crypto" />}
-                        {st.status === "done" && st.source === "live" && <SourceTag kind={st.hash ? "live-tx" : "live-read"} />}
+                        {st.source === "live" && (st.status === "done" || (st.status === "failed" && st.readResult && !st.hash)) && <SourceTag kind={st.hash ? "live-tx" : "live-read"} />}
                       </div>
                       {msg && <p className="font-mono text-xs text-muted">{msg}</p>}
                       {st.detail && <p className={cx("mt-1 text-sm", st.status === "failed" ? "text-block" : "text-ink-2")}>{st.detail}</p>}

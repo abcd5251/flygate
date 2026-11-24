@@ -165,7 +165,7 @@ export class FakeChain implements ServerChain {
 }
 
 /** pqcVerify answered for real; every other eth_call succeeds with no data. */
-function defaultEthCall(req: EthCallRequest): EthCallResult {
+export function defaultEthCall(req: EthCallRequest): EthCallResult {
   if (req.to.toLowerCase() !== PQC_VERIFY_ADDRESS) return { status: "success", data: "0x" };
   const { args } = decodeFunctionData({ abi: PQC_VERIFY_ABI, data: req.data });
   const [pubkey, signature, message] = args as [Hex, Hex, Hex];

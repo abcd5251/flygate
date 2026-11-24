@@ -98,14 +98,20 @@ export type QuoteCheck = { ok: boolean; detail: string; source: TxSource; readRe
  * `verified` whether it checked out (Live: confirmTicket() succeeded).
  */
 export type TicketProofResult = { proof: ChainTx; release: ChainTx; sigBytes?: number; sigPreview?: string; verified: boolean };
-export type FareCapInput = { offerId: string; priceUsd: number; maxFareUsd: number };
+/** `bookingId` is the Live quote whose book() is simulated (absent in Simulated mode). */
+export type FareCapInput = { offerId: string; priceUsd: number; maxFareUsd: number; bookingId?: string };
 
 /** Result of the backup on-chain fare-cap check, run after the off-chain gate rejected a quote. */
 export type FareCapCheck = {
   source: TxSource;
   /** A rejected tx (simulated). Live mode reads with eth_call instead and sends nothing. */
   tx?: ChainTx;
+  /** Live: the decoded `FareOverCap(maxFareWei, priceWei)` and the owner's balance before/after. */
   readResult?: string;
+  /** Live: whether the contract refused with FareOverCap and the balance did not move. */
+  ok?: boolean;
+  code?: string;
+  detail?: string;
 };
 
 /**
@@ -279,8 +285,8 @@ export const liveChain: ChainPort = {
   async cancelBooking() {
     return notYetLive("cancelBooking");
   },
-  async checkFareCap() {
-    return notYetLive("checkFareCap");
+  async checkFareCap({ bookingId }) {
+    return postLive<FareCapCheck>("/api/live/checkout", { step: "farecap", bookingId }, (reason, code) => ({ source: "live", ok: false, code, detail: reason }));
   },
   async status() {
     let res: Response;

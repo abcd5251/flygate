@@ -2,7 +2,7 @@ import "server-only";
 import { executeEvmMsg, evmAuthSignBytes, evmAuthSignBytesV2 } from "@qorechain/sdk";
 import { decodeFunctionResult, hexToBytes, keccak256, stringToBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import type { CheckoutQuote, QuoteCheck, TicketProofResult } from "@/lib/chain";
+import type { CheckoutQuote, FareCapCheck, QuoteCheck, TicketProofResult } from "@/lib/chain";
 import {
   bookingId as bookingIdOf,
   Cabin as EscrowCabin,
@@ -26,6 +26,7 @@ import { DEMO_OFFERS, PRICE_CHANGE_USD } from "@/lib/offers";
 import type { Cabin, ChainTx, Mandate, Offer, Scenario } from "@/lib/types";
 import type { CosmosMsg, EvmAuthDigestVersion, Hex, ServerChain } from "./chain";
 import type { BookLane, LiveConfig } from "./config";
+import { fareCapCheck } from "./farecap";
 import type { LiveKeys } from "./keys";
 import { BadRequest, parseMandate, STEP_TIMEOUT_MS } from "./mandate";
 import { formatQor, usdToUqor, WEI_PER_UQOR } from "./money";
@@ -40,7 +41,7 @@ import { errorText, txFactory, type Clock, type StepResult, type TxText } from "
  *
  * Every broadcast is idempotent per (step, bookingId) (D-28) and never retried.
  */
-export const CHECKOUT_STEPS = ["quote", "verify", "lock", "proof"] as const;
+export const CHECKOUT_STEPS = ["quote", "verify", "lock", "proof", "farecap"] as const;
 export type CheckoutStep = (typeof CHECKOUT_STEPS)[number];
 
 /** A quote is valid for 20 minutes, like the simulated one (D-15). */
@@ -69,7 +70,7 @@ export interface CheckoutInput {
   pnr?: unknown;
 }
 
-export type CheckoutResponse = CheckoutQuote | QuoteCheck | ChainTx | TicketProofResult;
+export type CheckoutResponse = CheckoutQuote | QuoteCheck | ChainTx | TicketProofResult | FareCapCheck;
 
 // ------------------------------------------------------------------ parsing
 
@@ -363,6 +364,12 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
         return lock(input);
       case "proof":
         return proof(input);
+      case "farecap": {
+        // Fare jumps (#22): eth_call of book() with the quoted booking; never broadcasts.
+        const b = quotes.get(parseBookingId(input.bookingId));
+        if (!b) return { source: "live", ok: false, code: "unknown booking", detail: "The server has no quote for this booking; nothing was checked" } satisfies FareCapCheck;
+        return fareCapCheck({ chain, keys, sender: bookSender }, b);
+      }
     }
   }
 
