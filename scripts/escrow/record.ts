@@ -26,6 +26,17 @@ export interface DeploymentRecord {
   contract?: { address: Hex; deployer: Hex; deployTx: TxRecord };
   /** Bank sends that funded the EVM signers (qor1 account -> signer's qor1 form). */
   funding: { label: string; amountUqor: string; tx: TxRecord }[];
+  /** ML-DSA-87 registrations (with proof of possession) for the EVM signers. */
+  pqcRegistrations?: { label: string; tx: TxRecord }[];
+  /** MsgOpenEVMWindow txs, with the bounds each window was opened with. */
+  evmWindows?: {
+    label: string;
+    maxTxs: number;
+    maxValueUqor: string;
+    blocks: number;
+    allowedTargets: string[];
+    tx: TxRecord;
+  }[];
   mandate?: { owner: Hex; agent: Hex; merchant: Hex; tx: TxRecord };
   flows: { confirm?: FlowRecord; cancel?: FlowRecord; refund?: FlowRecord };
   gas?: { book: number; confirmTicket: number; cancel: number; refund: number };

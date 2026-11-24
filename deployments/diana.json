@@ -22,5 +22,47 @@
       }
     }
   ],
-  "flows": {}
+  "flows": {},
+  "pqcRegistrations": [
+    {
+      "label": "owner EVM signer qor1kua0ncdvx9htrvdpvrrcvmeajdch3a0slwq8s6",
+      "tx": {
+        "hash": "950DE5B18C3A80D4CED4D03F8DB83133E23481A6020C782112F3085EF2C0F661",
+        "block": 10662845,
+        "url": "https://explore.qore.network/tx/950DE5B18C3A80D4CED4D03F8DB83133E23481A6020C782112F3085EF2C0F661"
+      }
+    },
+    {
+      "label": "agent EVM signer qor10evmct6nfh0njvt6rgat8zcxwhhm4wq39psqm8",
+      "tx": {
+        "hash": "5746857A8CD8E4A9DD8A12124E812B1D78E9ABA5BCFAE2BFB702DD7ACDAA6B24",
+        "block": 10662847,
+        "url": "https://explore.qore.network/tx/5746857A8CD8E4A9DD8A12124E812B1D78E9ABA5BCFAE2BFB702DD7ACDAA6B24"
+      }
+    }
+  ],
+  "evmWindows": [
+    {
+      "label": "owner EVM signer: deploy + setMandate",
+      "maxTxs": 2,
+      "maxValueUqor": "375000",
+      "blocks": 1800,
+      "allowedTargets": [],
+      "tx": {
+        "hash": "8B1933B80AB70CA152836B36BAC01FE503822AB98309E39EAF28D060399FB61E",
+        "block": 10662850,
+        "url": "https://explore.qore.network/tx/8B1933B80AB70CA152836B36BAC01FE503822AB98309E39EAF28D060399FB61E"
+      }
+    }
+  ],
+  "contract": {
+    "address": "0x7e9eCaBf07fAde561d4022A53ca7865c7531D97C",
+    "deployer": "0xb73af9e1AC316Eb1B1a160c7866F3D937178F5F0",
+    "deployTx": {
+      "hash": "0x1c246db3ab6b4c90c7fd0b12e3dc0707a241d4d00d9b1cf3b9dbfc7902bd3a9f",
+      "block": 10662861,
+      "gasUsed": 1661885,
+      "url": "https://explore.qore.network/tx/0x1c246db3ab6b4c90c7fd0b12e3dc0707a241d4d00d9b1cf3b9dbfc7902bd3a9f"
+    }
+  }
 }

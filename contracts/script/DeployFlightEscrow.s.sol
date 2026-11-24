@@ -5,15 +5,15 @@ import {Script, console} from "forge-std/Script.sol";
 import {FlightEscrow} from "../FlightEscrow.sol";
 
 /// @notice Deploys FlightEscrow to diana. The constructor reverts on any other chain.
-///         Run through `pnpm escrow:deploy`, which derives the owner's EVM signer from
-///         .env.local and passes it in DEPLOYER_PRIVATE_KEY (never written to disk).
-///         By hand:
-///           DEPLOYER_PRIVATE_KEY=0x... forge script contracts/script/DeployFlightEscrow.s.sol \
-///             --rpc-url https://evm-testnet.qore.host --broadcast --slow
+///         `pnpm escrow:deploy` runs this WITHOUT --broadcast, as a simulation from the owner
+///         signer (--sender), then signs and sends the recorded CREATE itself: forge re-sends
+///         a refused broadcast on its own, and diana's EVM lane first needs a registered PQC
+///         key and an open EVM window, which the wrapper sets up. Forge never sees a key.
+///           forge script contracts/script/DeployFlightEscrow.s.sol \
+///             --rpc-url https://evm-testnet.qore.host --sender <owner signer>
 contract DeployFlightEscrow is Script {
     function run() external returns (FlightEscrow escrow) {
-        uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
-        vm.startBroadcast(deployerKey);
+        vm.startBroadcast();
         escrow = new FlightEscrow();
         vm.stopBroadcast();
         console.log("FlightEscrow", address(escrow));
