@@ -31,9 +31,13 @@ contract MockPqcKeyStatus {
 
     mapping(address => Status) private statuses;
 
-    function setStatus(address account, bool registered, uint8 algorithmId, bytes calldata pubkey, bool possessionProven)
-        external
-    {
+    function setStatus(
+        address account,
+        bool registered,
+        uint8 algorithmId,
+        bytes calldata pubkey,
+        bool possessionProven
+    ) external {
         statuses[account] = Status(registered, algorithmId, pubkey, possessionProven);
     }
 

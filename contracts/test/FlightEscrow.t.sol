@@ -66,7 +66,133 @@ contract FlightEscrowTest is Test {
         assertEq(address(escrow).balance, 0, "escrow emptied");
     }
 
+    // ------------------------------------------------------------ signatures
+
+    function test_book_revertsOnWrongSignature() public {
+        FlightEscrow.Quote memory q = _quote();
+        _setMandate();
+        _signQuote(q);
+        bytes memory forged = _filled(4627, 0xEE);
+
+        vm.expectRevert(FlightEscrow.InvalidSignature.selector);
+        vm.prank(agent);
+        escrow.book{value: q.priceWei}(q, forged);
+        assertEq(agent.balance, 10 ether, "agent keeps funds");
+    }
+
+    function test_book_revertsWhenSignedQuoteDiffersFromSubmitted() public {
+        FlightEscrow.Quote memory q = _quote();
+        _setMandate();
+        bytes memory sig = _signQuote(q);
+        q.priceWei = 0.5 ether; // agent tampers with the price after the merchant signed
+
+        vm.expectRevert(FlightEscrow.InvalidSignature.selector);
+        vm.prank(agent);
+        escrow.book{value: q.priceWei}(q, sig);
+    }
+
+    function test_confirmTicket_revertsOnWrongSignature() public {
+        bytes32 bookingId = _book();
+        FlightEscrow.TicketProof memory t = _ticket(bookingId);
+        _signTicket(t);
+        bytes memory forged = _filled(4627, 0xEE);
+        uint256 merchantBefore = merchant.balance;
+
+        vm.expectRevert(FlightEscrow.InvalidSignature.selector);
+        escrow.confirmTicket(t, forged);
+        assertEq(merchant.balance, merchantBefore, "merchant not paid");
+    }
+
+    // ----------------------------------------------------------- merchant key
+
+    function test_book_revertsWhenMerchantKeyLacksPossessionProof() public {
+        _setMerchantKey(true, 1, false);
+        FlightEscrow.Quote memory q = _quote();
+        _setMandate();
+        bytes memory sig = _signQuote(q);
+
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.MerchantKeyPossessionUnproven.selector, merchant));
+        vm.prank(agent);
+        escrow.book{value: q.priceWei}(q, sig);
+    }
+
+    function test_book_revertsWhenMerchantKeyNotRegistered() public {
+        _setMerchantKey(false, 0, false);
+        FlightEscrow.Quote memory q = _quote();
+        _setMandate();
+        bytes memory sig = _signQuote(q);
+
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.MerchantKeyNotRegistered.selector, merchant));
+        vm.prank(agent);
+        escrow.book{value: q.priceWei}(q, sig);
+    }
+
+    function test_book_revertsWhenMerchantKeyIsNotMlDsa87() public {
+        _setMerchantKey(true, 2, true);
+        FlightEscrow.Quote memory q = _quote();
+        _setMandate();
+        bytes memory sig = _signQuote(q);
+
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.UnsupportedKeyAlgorithm.selector, 2));
+        vm.prank(agent);
+        escrow.book{value: q.priceWei}(q, sig);
+    }
+
+    // ----------------------------------------------------------- ticket window
+
+    function test_confirmTicket_succeedsAtDeadline() public {
+        bytes32 bookingId = _book();
+        FlightEscrow.TicketProof memory t = _ticket(bookingId);
+        bytes memory sig = _signTicket(t);
+        uint256 merchantBefore = merchant.balance;
+
+        vm.warp(block.timestamp + _quote().ticketWindow);
+        escrow.confirmTicket(t, sig);
+        assertEq(merchant.balance - merchantBefore, 1 ether, "merchant paid at deadline");
+    }
+
+    function test_confirmTicket_revertsOneSecondAfterDeadline() public {
+        bytes32 bookingId = _book();
+        FlightEscrow.TicketProof memory t = _ticket(bookingId);
+        bytes memory sig = _signTicket(t);
+
+        vm.warp(block.timestamp + _quote().ticketWindow + 1);
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.TicketDeadlinePassed.selector, bookingId));
+        escrow.confirmTicket(t, sig);
+        assertEq(address(escrow).balance, 1 ether, "funds stay locked");
+    }
+
+    // ------------------------------------------------------------- payment
+
+    function test_book_revertsWhenValueDiffersFromPrice() public {
+        FlightEscrow.Quote memory q = _quote();
+        _setMandate();
+        bytes memory sig = _signQuote(q);
+
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.WrongPayment.selector, q.priceWei, q.priceWei - 1));
+        vm.prank(agent);
+        escrow.book{value: q.priceWei - 1}(q, sig);
+    }
+
+    function test_confirmTicket_revertsTheSecondTime() public {
+        bytes32 bookingId = _book();
+        FlightEscrow.TicketProof memory t = _ticket(bookingId);
+        bytes memory sig = _signTicket(t);
+        escrow.confirmTicket(t, sig);
+
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.NotLocked.selector, bookingId));
+        escrow.confirmTicket(t, sig);
+    }
+
     // --------------------------------------------------------------- helpers
+
+    function _book() internal returns (bytes32 bookingId) {
+        FlightEscrow.Quote memory q = _quote();
+        _setMandate();
+        bytes memory sig = _signQuote(q);
+        vm.prank(agent);
+        bookingId = escrow.book{value: q.priceWei}(q, sig);
+    }
 
     function _mandate() internal view returns (FlightEscrow.Mandate memory) {
         return FlightEscrow.Mandate({
@@ -139,6 +265,8 @@ contract FlightEscrowTest is Test {
 
     function _filled(uint256 len, uint8 b) internal pure returns (bytes memory out) {
         out = new bytes(len);
-        for (uint256 i; i < len; ++i) out[i] = bytes1(b);
+        for (uint256 i; i < len; ++i) {
+            out[i] = bytes1(b);
+        }
     }
 }
