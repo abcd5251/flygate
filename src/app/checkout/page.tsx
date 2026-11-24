@@ -8,17 +8,22 @@ import { AirlineBadge } from "@/components/FlightCard";
 import { EmptyState, FlowBand } from "@/components/FlowBand";
 import { Card, cx, GhostButton, HashText, Pill, PrimaryButton, SourceTag, Spinner } from "@/components/ui";
 import { newBooking, STEP_META } from "@/lib/booking";
-import { ADDRESSES, fakeHash, fakePnr, makeTx, shortAddr } from "@/lib/chain";
+import { ADDRESSES, fakeHash, fakePnr, getChain, shortAddr } from "@/lib/chain";
 import { checkOffer, rankOffers } from "@/lib/gate";
 import { formatDateLong, usd } from "@/lib/mandate";
 import { DEMO_OFFERS, formatDuration, PRICE_CHANGE_USD } from "@/lib/offers";
 import { pqcVerifyMerchant, preview, signAsMerchant } from "@/lib/pq";
 import { useDemo } from "@/lib/store";
-import type { Booking, BookingStep, BookingStepKey } from "@/lib/types";
+import type { Booking, BookingStep, BookingStepKey, ChainTx } from "@/lib/types";
 
 const ACTOR_LABEL = { merchant: "Merchant", chain: "Chain", agent: "Agent", gate: "Gate" } as const;
 const ACTOR_TONE = { merchant: "muted", chain: "pq", agent: "brand", gate: "pass" } as const;
 const REAL_CRYPTO: BookingStepKey[] = ["quote", "verify", "proof"];
+
+/** The step fields that come from a chain tx: its hash, where it came from and its explorer link. */
+function txStep(tx: ChainTx): Pick<BookingStep, "hash" | "source" | "explorerUrl"> {
+  return { hash: tx.hash, source: tx.source, explorerUrl: tx.explorerUrl };
+}
 
 export default function CheckoutPage() {
   const router = useRouter();
@@ -26,6 +31,7 @@ export default function CheckoutPage() {
   const booking = state.booking;
   const offer = DEMO_OFFERS.find((o) => o.id === booking?.offerId);
   const quoteRef = useRef<{ payload: unknown; sig: Uint8Array } | null>(null);
+  const releaseRef = useRef<ChainTx | null>(null);
   const [stay, setStay] = useState(false);
 
   function patchBooking(fn: (b: Booking) => Booking) {
@@ -38,6 +44,7 @@ export default function CheckoutPage() {
   useEffect(() => {
     if (!ready || !booking || booking.status !== "running" || !offer) return;
     let cancelled = false;
+    const chain = getChain();
 
     async function quotePayload() {
       const s = latest();
@@ -84,7 +91,8 @@ export default function CheckoutPage() {
           const v = checkOffer(offer!, m, price);
           if (!v.ok) {
             setStep(key, { status: "failed", detail: `${v.firstFail?.detail}. The agent stopped before paying.`, at: Date.now() });
-            addTx(makeTx("Backup on-chain check: overspend rejected", "perTxLimit", "agent", false, "abstractaccount 5"));
+            const cap = await chain.checkFareCap({ offerId: offer!.id, priceUsd: price, maxFareUsd: m.maxFareUsd });
+            if (cap.tx) addTx(cap.tx);
             update((st) => ({ ...st, scenario: "normal", booking: st.booking ? { ...st.booking, status: "blocked" } : st.booking }));
             return "stop";
           }
@@ -92,10 +100,10 @@ export default function CheckoutPage() {
           return "next";
         }
         case "lock": {
-          const tx = makeTx(`Escrow ${usd(b.quotedPriceUsd ?? b.priceUsd)}`, "MsgExecuteEVM", "agent");
+          const tx = await chain.lockFunds({ offerId: offer!.id, amountUsd: b.quotedPriceUsd ?? b.priceUsd });
           addTx(tx);
           update((st) => ({ ...st, spentUsd: st.spentUsd + (b.quotedPriceUsd ?? b.priceUsd) }));
-          setStep(key, { status: "done", detail: `${b.quotedPriceUsd ?? b.priceUsd} fUSD → ${shortAddr(ADDRESSES.escrow, 8, 4)}`, hash: tx.hash, at: Date.now() });
+          setStep(key, { status: "done", detail: `${b.quotedPriceUsd ?? b.priceUsd} fUSD → ${shortAddr(ADDRESSES.escrow, 8, 4)}`, ...txStep(tx), at: Date.now() });
           return "next";
         }
         case "order": {
@@ -105,7 +113,7 @@ export default function CheckoutPage() {
             await wait(1200);
             if (cancelled) return "stop";
             const amount = b.quotedPriceUsd ?? b.priceUsd;
-            const tx = makeTx(`Refund ${usd(amount)}`, "FlightEscrow.refund()", "contract");
+            const tx = await chain.cancelBooking({ offerId: offer!.id, amountUsd: amount });
             addTx(tx);
             update((st) => ({
               ...st,
@@ -117,7 +125,7 @@ export default function CheckoutPage() {
                     ...st.booking,
                     status: "refunded",
                     steps: st.booking.steps.map((x) =>
-                      x.key === "refund" ? { ...x, status: "done", detail: `${amount} fUSD back to ${shortAddr(ADDRESSES.owner, 8, 4)}`, hash: tx.hash, at: Date.now() } : x,
+                      x.key === "refund" ? { ...x, status: "done", detail: `${amount} fUSD back to ${shortAddr(ADDRESSES.owner, 8, 4)}`, ...txStep(tx), at: Date.now() } : x,
                     ),
                   }
                 : st.booking,
@@ -138,15 +146,21 @@ export default function CheckoutPage() {
           const payload = { pnr, offerId: offer!.id, escrow: ADDRESSES.escrow, issuedAt: Date.now() };
           const r = await signAsMerchant(payload);
           const ok = await pqcVerifyMerchant(payload, r.sig);
-          const tx = makeTx("Ticket proof on-chain", "FlightEscrow.confirmTicket()", "merchant");
+          const { proof: tx, release } = await chain.confirmTicket({ offerId: offer!.id, amountUsd: b.quotedPriceUsd ?? b.priceUsd });
+          releaseRef.current = release;
           addTx(tx);
           patchBooking((bk) => ({ ...bk, proofSigPreview: preview(r.sig) }));
-          setStep(key, { status: ok ? "done" : "failed", detail: `ML-DSA-87 signature ${r.sigBytes.toLocaleString()} bytes · pqcVerify → ${ok}`, hash: tx.hash, at: Date.now() });
+          setStep(key, { status: ok ? "done" : "failed", detail: `ML-DSA-87 signature ${r.sigBytes.toLocaleString()} bytes · pqcVerify → ${ok}`, ...txStep(tx), at: Date.now() });
           return ok ? "next" : "stop";
         }
         case "release": {
-          const tx = makeTx("Payout to merchant", "FlightEscrow.release()", "contract");
-          addTx(tx);
+          // The payout is the `Released` event of the confirmTicket() tx sent in the proof step.
+          const tx = releaseRef.current;
+          releaseRef.current = null;
+          const proofStep = latest().booking?.steps.find((x) => x.key === "proof");
+          if (tx && tx.hash !== proofStep?.hash) addTx(tx);
+          // After a reload the ref is gone; fall back to the proof tx, which carries the event.
+          const shown = tx ?? proofStep;
           update((st) => ({
             ...st,
             booking: st.booking
@@ -154,7 +168,7 @@ export default function CheckoutPage() {
                   ...st.booking,
                   status: "succeeded",
                   steps: st.booking.steps.map((x) =>
-                    x.key === "release" ? { ...x, status: "done", detail: `${b.quotedPriceUsd ?? b.priceUsd} fUSD → ${shortAddr(ADDRESSES.merchant, 8, 4)}`, hash: tx.hash, at: Date.now() } : x,
+                    x.key === "release" ? { ...x, status: "done", detail: `${b.quotedPriceUsd ?? b.priceUsd} fUSD → ${shortAddr(ADDRESSES.merchant, 8, 4)}`, hash: shown?.hash, source: shown?.source, explorerUrl: shown?.explorerUrl, at: Date.now() } : x,
                   ),
                 }
               : st.booking,
@@ -271,13 +285,14 @@ export default function CheckoutPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <p className={cx("font-bold", st.status === "pending" ? "text-muted" : st.status === "failed" ? "text-block" : "text-ink")}>{meta.title}</p>
                         <Pill tone={ACTOR_TONE[meta.actor]}>{ACTOR_LABEL[meta.actor]}</Pill>
-                        {st.status === "done" && REAL_CRYPTO.includes(st.key) && <SourceTag real />}
+                        {st.status === "done" && REAL_CRYPTO.includes(st.key) && <SourceTag kind="crypto" />}
+                        {st.status === "done" && st.source === "live" && <SourceTag kind={st.hash ? "live-tx" : "live-read"} />}
                       </div>
                       {meta.msg && <p className="font-mono text-xs text-muted">{meta.msg}</p>}
                       {st.detail && <p className={cx("mt-1 text-sm", st.status === "failed" ? "text-block" : "text-ink-2")}>{st.detail}</p>}
                     </div>
                     <div className="hidden shrink-0 pt-1 text-right sm:block">
-                      {st.hash && <HashText value={st.hash} head={8} tail={4} />}
+                      {st.hash && <HashText value={st.hash} head={8} tail={4} explorerUrl={st.explorerUrl} />}
                       {st.at && <p className="tabular text-[11px] text-muted">{new Date(st.at).toLocaleTimeString("zh-TW", { hour12: false })}</p>}
                     </div>
                   </li>

@@ -1,9 +1,10 @@
-import type { ChainTx, TxKind } from "./types";
+import { usd } from "./mandate";
+import type { ChainTx, Mandate, TxKind, TxSource } from "./types";
 
 /**
- * Simulated QoreChain (diana testnet) layer. Every function here is a stand-in
- * for a real transaction; the message names match the QoreChain SDK so the
- * swap to real calls is one module.
+ * Browser-safe QoreChain (diana testnet) layer: constants, `shortAddr`, the simulation helpers
+ * and the `ChainPort` interface the pages use for every on-chain step. Nothing here may touch
+ * keys or `@qorechain/sdk`; live signing happens on the server (ADR-0001).
  */
 
 export const CHAIN = {
@@ -47,9 +48,10 @@ export function fakePnr() {
 }
 
 let seq = 0;
+/** A simulated transaction with a random hash. Simulated mode only; live txs come from the API. */
 export function makeTx(label: string, msg: string, kind: TxKind, ok = true, code?: string): ChainTx {
   seq += 1;
-  return { id: `tx_${Date.now()}_${seq}`, label, msg, hash: fakeHash(), kind, ok, code, at: Date.now() };
+  return { id: `tx_${Date.now()}_${seq}`, label, msg, hash: fakeHash(), kind, ok, code, at: Date.now(), source: "simulated" };
 }
 
 export function sleep(ms: number) {
@@ -57,3 +59,71 @@ export function sleep(ms: number) {
 }
 
 export const STARTING_BALANCE_USD = 1000;
+
+/** The three owner transactions the wallet sends after the mandate is signed, in order. */
+export type MandateTxStep = "link" | "spending" | "window";
+export const MANDATE_TX_STEPS: MandateTxStep[] = ["link", "spending", "window"];
+
+export type MandateChainInput = { step: MandateTxStep; mandate: Mandate; mandateHash?: string };
+export type BookingChainInput = { offerId: string; amountUsd: number };
+export type FareCapInput = { offerId: string; priceUsd: number; maxFareUsd: number };
+
+/** Result of the backup on-chain fare-cap check, run after the off-chain gate rejected a quote. */
+export type FareCapCheck = {
+  source: TxSource;
+  /** A rejected tx (simulated). Live mode reads with eth_call instead and sends nothing. */
+  tx?: ChainTx;
+  readResult?: string;
+};
+
+export type ChainStatus = { available: boolean; reason?: string; escrow: string; explorer: string };
+
+/**
+ * Every on-chain step of /mandate and /checkout goes through this port. `simulatedChain` is the
+ * only implementation for now; `liveChain` (fetching /api/live/*) comes with the Live mode.
+ */
+export interface ChainPort {
+  setupMandate(input: MandateChainInput): Promise<ChainTx>;
+  lockFunds(input: BookingChainInput): Promise<ChainTx>;
+  /** `release` is the payout the `Released` event of the same confirmTicket() reports. */
+  confirmTicket(input: BookingChainInput): Promise<{ proof: ChainTx; release: ChainTx }>;
+  cancelBooking(input: BookingChainInput): Promise<ChainTx>;
+  checkFareCap(input: FareCapInput): Promise<FareCapCheck>;
+  status(): Promise<ChainStatus>;
+}
+
+const SIMULATED_MANDATE_TXS: Record<MandateTxStep, readonly [label: string, msg: string]> = {
+  link: ["Link agent key", "MsgRegisterAuthenticator"],
+  spending: ["Set spending rules", "MsgUpdateSpendingRules"],
+  window: ["Open scoped window", "MsgOpenEVMWindow"],
+};
+
+export const simulatedChain: ChainPort = {
+  async setupMandate({ step }) {
+    const [label, msg] = SIMULATED_MANDATE_TXS[step];
+    return makeTx(label, msg, "owner");
+  },
+  async lockFunds({ amountUsd }) {
+    return makeTx(`Escrow ${usd(amountUsd)}`, "MsgExecuteEVM", "agent");
+  },
+  async confirmTicket() {
+    return {
+      proof: makeTx("Ticket proof on-chain", "FlightEscrow.confirmTicket()", "merchant"),
+      release: makeTx("Payout to merchant", "Released event · confirmTicket()", "contract"),
+    };
+  },
+  async cancelBooking({ amountUsd }) {
+    return makeTx(`Refund ${usd(amountUsd)}`, "FlightEscrow.cancel()", "contract");
+  },
+  async checkFareCap() {
+    return { source: "simulated", tx: makeTx("Backup on-chain check: overspend rejected", "perTxLimit", "agent", false, "abstractaccount 5") };
+  },
+  async status() {
+    return { available: true, escrow: ADDRESSES.escrow, explorer: CHAIN.explorer };
+  },
+};
+
+/** The chain the pages use. Always simulated until the Live/Simulated switch exists. */
+export function getChain(): ChainPort {
+  return simulatedChain;
+}

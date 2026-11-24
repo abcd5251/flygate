@@ -8,7 +8,7 @@ import { BoardingPass } from "@/components/BoardingPass";
 import { FlowBand } from "@/components/FlowBand";
 import { Card, HashText, PrimaryButton, SourceTag } from "@/components/ui";
 import { WalletModal } from "@/components/WalletModal";
-import { ADDRESSES, makeTx, shortAddr } from "@/lib/chain";
+import { ADDRESSES, getChain, MANDATE_TX_STEPS, shortAddr } from "@/lib/chain";
 import { formatExpiry, mandateRules, usd } from "@/lib/mandate";
 import { encryptPassenger, preview, signAsOwner, type SignResult } from "@/lib/pq";
 import { useDemo } from "@/lib/store";
@@ -49,15 +49,9 @@ export default function MandatePage() {
       return `KEM ${e.kemCiphertextBytes.toLocaleString()} bytes + AES-GCM ${e.aesCiphertextBytes} bytes`;
     }
     await wait(650);
-    const msgs = [
-      ["Link agent key", "MsgRegisterAuthenticator"],
-      ["Set spending rules", "MsgUpdateSpendingRules"],
-      ["Open scoped window", "MsgOpenEVMWindow"],
-    ] as const;
-    const [label, msg] = msgs[i - 2];
-    const tx = makeTx(label, msg, "owner");
+    const tx = await getChain().setupMandate({ step: MANDATE_TX_STEPS[i - 2], mandate: m, mandateHash: signRef.current?.hash });
     addTx(tx);
-    return `${msg} · ${tx.hash.slice(0, 14)}…`;
+    return `${tx.msg} · ${tx.hash.slice(0, 14)}…`;
   }
 
   function onSigned() {
@@ -142,7 +136,7 @@ export default function MandatePage() {
                   <p className="text-xs text-muted">Sent to merchant as</p>
                   <p className="font-mono text-xs break-all text-ink-2">0x{state.passenger.preview}…</p>
                   <p className="mt-1 flex items-center gap-2 text-xs text-muted">
-                    ML-KEM-1024 ciphertext <SourceTag real />
+                    ML-KEM-1024 ciphertext <SourceTag kind="crypto" />
                   </p>
                 </div>
               </div>
@@ -179,7 +173,7 @@ export default function MandatePage() {
                   {ownerTxs.map((t) => (
                     <li key={t.id} className="flex items-center justify-between gap-2 text-sm">
                       <span className="text-ink">{t.label}</span>
-                      <HashText value={t.hash} head={8} tail={4} />
+                      <HashText value={t.hash} head={8} tail={4} explorerUrl={t.explorerUrl} />
                     </li>
                   ))}
                 </ul>

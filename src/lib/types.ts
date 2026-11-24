@@ -78,6 +78,12 @@ export type GateVerdict = {
 
 export type TxKind = "owner" | "agent" | "merchant" | "contract" | "attacker";
 
+/** Where a chain result came from: a simulated stand-in, or the diana testnet. */
+export type TxSource = "simulated" | "live";
+
+/** Which transaction format carried a live tx: a Cosmos tx (Cosmos hash) or a plain EVM tx (0x hash). */
+export type TxLane = "cosmos" | "evm";
+
 export type ChainTx = {
   id: string;
   label: string;
@@ -87,6 +93,9 @@ export type ChainTx = {
   ok: boolean;
   code?: string;
   at: number;
+  source: TxSource;
+  explorerUrl?: string;
+  lane?: TxLane;
 };
 
 export type SignedMandate = {
@@ -118,6 +127,10 @@ export type BookingStep = {
   detail?: string;
   hash?: string;
   at?: number;
+  source?: TxSource;
+  explorerUrl?: string;
+  /** Result of a read-only chain query (eth_call / REST), shown as "Live read". */
+  readResult?: string;
 };
 
 export type BookingStatus = "running" | "succeeded" | "refunded" | "blocked";

@@ -105,7 +105,7 @@ export default function TicketPage() {
                     <p className="text-xs text-muted">{p.note}</p>
                   </div>
                   <HashText value={p.value} head={18} tail={6} className="justify-self-start" />
-                  <SourceTag real={p.real} />
+                  <SourceTag kind={p.real ? "crypto" : "simulated"} />
                 </li>
               ))}
             </ul>

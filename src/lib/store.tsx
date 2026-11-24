@@ -59,6 +59,18 @@ function initialState(): DemoState {
   };
 }
 
+/**
+ * Fills defaults for fields older saved sessions lack: top-level fields from `initialState()`,
+ * and `source` on chain txs (everything saved before Live mode existed was simulated).
+ */
+function restoreState(saved: Partial<DemoState>): DemoState {
+  const base = { ...initialState(), ...saved };
+  return {
+    ...base,
+    txs: (Array.isArray(base.txs) ? base.txs : []).map((t) => ({ ...t, source: t.source ?? "simulated" })),
+  };
+}
+
 type Ctx = {
   state: DemoState;
   ready: boolean;
@@ -84,7 +96,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     let restored: DemoState | undefined;
     try {
       const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (raw) restored = { ...initialState(), ...(JSON.parse(raw) as Partial<DemoState>) };
+      if (raw) restored = restoreState(JSON.parse(raw) as Partial<DemoState>);
     } catch {
       restored = undefined;
     }
