@@ -1,12 +1,14 @@
 // `pnpm bootstrap` - get the FlyGate diana testnet accounts ready. Every step is idempotent.
 //   (default)      full bootstrap
 //   --check-only   read chain state and print the verification table; sends nothing
+//   --ping         owner hybrid-signs a 1 uqor transfer to the merchant (fresh tx hash for demos)
 import { resolve } from "node:path";
 import { PqcKeyMismatchError, type QoreChainClient } from "@qorechain/sdk";
 import { ROLES, loadEnv, type NetworkSettings, type Role } from "./env";
 import {
   balanceOf,
   connect,
+  DENOM,
   deriveRole,
   formatQor,
   makeClient,
@@ -14,13 +16,15 @@ import {
   registerPqc,
   type RoleAccount,
 } from "./chain";
-import { printReport, type AccountRow, type SentTx } from "./report";
+import { explorerTxUrl, printReport, type AccountRow, type SentTx } from "./report";
 
 const ENV_PATH = resolve(import.meta.dirname, "../../.env.local");
 const FAUCET_URL = "https://dashboard.qorechain.io/faucet";
 const FAUCET_POLL_MS = 2000;
 
-type Mode = "bootstrap" | "check-only";
+type Mode = "bootstrap" | "check-only" | "ping";
+
+const USAGE = "Usage: pnpm bootstrap [--check-only | --ping]";
 
 interface Context {
   network: NetworkSettings;
@@ -32,9 +36,12 @@ interface Context {
 
 function parseMode(argv: string[]): Mode {
   const flags = argv.filter((a) => a !== "--");
-  const unknown = flags.filter((a) => a !== "--check-only");
-  if (unknown.length > 0) throw new Error(`Unknown argument(s): ${unknown.join(" ")}. Usage: pnpm bootstrap [--check-only]`);
-  return flags.includes("--check-only") ? "check-only" : "bootstrap";
+  const unknown = flags.filter((a) => a !== "--check-only" && a !== "--ping");
+  if (unknown.length > 0) throw new Error(`Unknown argument(s): ${unknown.join(" ")}. ${USAGE}`);
+  const checkOnly = flags.includes("--check-only");
+  const ping = flags.includes("--ping");
+  if (checkOnly && ping) throw new Error(`--check-only and --ping cannot be combined. ${USAGE}`);
+  return ping ? "ping" : checkOnly ? "check-only" : "bootstrap";
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -72,6 +79,37 @@ async function registerOwnerPqc(ctx: Context): Promise<void> {
   }
 }
 
+/**
+ * Owner sends 1 uqor to the merchant, hybrid-signed, for a fresh on-chain tx hash.
+ * Needs only the owner to be ready (funded + PQC-registered); never funds or registers.
+ */
+async function ping(ctx: Context): Promise<void> {
+  const owner = ctx.accounts.owner;
+  const merchant = ctx.accounts.merchant;
+  const balance = await balanceOf(ctx.client, owner.address);
+  const pqc = await pqcStatusOf(ctx.network, owner.address);
+  const missing = [balance === BigInt(0) && "has no QOR", !pqc.registered && "has no ML-DSA-87 key registered"].filter(
+    Boolean,
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `--ping needs a ready owner, but owner ${owner.address} ${missing.join(" and ")}. ` +
+        "Run `pnpm bootstrap` first to fund and register it.",
+    );
+  }
+
+  const tx = await connect(ctx.client, owner);
+  try {
+    // Not retried: a retry after a landed send would send twice.
+    const res = await tx.bankSend(merchant.address, [{ denom: DENOM, amount: "1" }]);
+    console.log(`Ping: owner -> merchant 1 ${DENOM}`);
+    console.log(`  tx:       ${res.transactionHash}${res.height ? ` (block ${res.height})` : ""}`);
+    console.log(`  explorer: ${explorerTxUrl(ctx.network.explorer, res.transactionHash)} (set the network toggle to Testnet)`);
+  } finally {
+    tx.disconnect();
+  }
+}
+
 async function collectRows(ctx: Context, roles: readonly Role[]): Promise<AccountRow[]> {
   const rows: AccountRow[] = [];
   for (const role of roles) {
@@ -99,6 +137,11 @@ async function main(): Promise<void> {
   const accounts = {} as Record<Role, RoleAccount>;
   for (const role of ROLES) accounts[role] = await deriveRole(role, env.mnemonics[role]);
   const ctx: Context = { network: env.network, client: makeClient(env.network), accounts, txs: [] };
+
+  if (mode === "ping") {
+    await ping(ctx);
+    return;
+  }
 
   if (mode === "bootstrap") {
     await waitForOwnerFunds(ctx);
