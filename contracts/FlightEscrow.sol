@@ -29,6 +29,10 @@ contract FlightEscrow {
     IPqcKeyStatus public constant PQC_KEY_STATUS = IPqcKeyStatus(0x0000000000000000000000000000000000000a02);
     uint8 public constant ALGORITHM_ML_DSA_87 = 1;
 
+    /// @notice Bounds on the merchant's exclusive ticketing window, in seconds.
+    uint32 public constant MIN_TICKET_WINDOW = 60;
+    uint32 public constant MAX_TICKET_WINDOW = 24 hours;
+
     /// @notice Domain tags mixed into every signed digest so one proof type can't pose as another.
     bytes32 public constant QUOTE_TYPE = keccak256("QUOTE");
     bytes32 public constant TICKET_TYPE = keccak256("TICKET");
@@ -150,6 +154,15 @@ contract FlightEscrow {
     error TransferFailed();
     error TicketDeadlineNotPassed(bytes32 bookingId);
     error TicketQuotaExhausted(uint32 maxTickets);
+    error MandateIsRevoked();
+    error MandateExpired();
+    error FareOverCap(uint256 maxFareWei, uint256 priceWei);
+    error RouteMismatch();
+    error DepartDayOutOfRange(uint32 departDay);
+    error CabinMismatch();
+    error RefundableRequired();
+    error QuoteExpired();
+    error InvalidTicketWindow(uint32 ticketWindow);
 
     constructor() {
         if (block.chainid != DIANA_CHAIN_ID) revert WrongChain(block.chainid);
@@ -168,15 +181,30 @@ contract FlightEscrow {
         emit MandateSet(msg.sender, agent, mandate.merchant, mandate.mandateHash);
     }
 
+    /// @notice Stop the agent from booking. Bookings already locked are unaffected.
+    function revokeMandate(address agent) external {
+        AgentMandate storage m = mandates[agent];
+        if (m.owner != msg.sender) revert NotMandateOwner();
+        m.revoked = true;
+        emit MandateRevoked(msg.sender, agent);
+    }
+
     // ------------------------------------------------------------------- bookings
 
     /// @notice Lock exactly `quote.priceWei` against a merchant-signed quote.
     function book(Quote calldata quote, bytes calldata signature) external payable returns (bytes32 bookingId) {
         AgentMandate storage m = mandates[msg.sender];
         if (m.owner == address(0)) revert NoMandate();
+        if (m.revoked) revert MandateIsRevoked();
+        if (block.timestamp > m.mandate.expiresAt) revert MandateExpired();
         if (quote.agent != msg.sender) revert AgentMismatch();
         if (quote.merchant != m.mandate.merchant) revert MerchantMismatch();
         if (msg.value != quote.priceWei) revert WrongPayment(quote.priceWei, msg.value);
+        _checkMandateRules(m.mandate, quote);
+        if (block.timestamp > quote.expiresAt) revert QuoteExpired();
+        if (quote.ticketWindow < MIN_TICKET_WINDOW || quote.ticketWindow > MAX_TICKET_WINDOW) {
+            revert InvalidTicketWindow(quote.ticketWindow);
+        }
 
         bookingId = keccak256(abi.encode(quote));
         Booking storage b = bookings[bookingId];
@@ -236,6 +264,17 @@ contract FlightEscrow {
     }
 
     // ------------------------------------------------------------------ internals
+
+    /// @dev The on-chain repeat of the gate rules: fare cap, route, date range, cabin, refundability.
+    function _checkMandateRules(Mandate storage mandate, Quote calldata quote) internal view {
+        if (quote.priceWei > mandate.maxFareWei) revert FareOverCap(mandate.maxFareWei, quote.priceWei);
+        if (quote.origin != mandate.origin || quote.destination != mandate.destination) revert RouteMismatch();
+        if (quote.departDay < mandate.departFrom || quote.departDay > mandate.departTo) {
+            revert DepartDayOutOfRange(quote.departDay);
+        }
+        if (quote.cabin != mandate.cabin) revert CabinMismatch();
+        if (mandate.refundableOnly && !quote.refundable) revert RefundableRequired();
+    }
 
     /// @dev Locked -> Refunded: pay the owner back and return one unit of the agent's quota.
     function _refund(bytes32 bookingId, Booking storage b, RefundReason reason) internal {
