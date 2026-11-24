@@ -9,6 +9,7 @@ import type {
   AttackState,
   Booking,
   ChainTx,
+  DemoMode,
   EncryptedPassenger,
   Mandate,
   PassengerInput,
@@ -17,6 +18,8 @@ import type {
 } from "./types";
 
 export type DemoState = {
+  /** Simulated or Live (diana) on-chain steps. Defaults to simulated; Reset demo keeps it. */
+  mode: DemoMode;
   scenario: Scenario;
   speed: 1 | 2;
   draft: Mandate;
@@ -46,6 +49,7 @@ const IDLE_ATTACKS: Record<AttackKey, AttackState> = {
 
 function initialState(): DemoState {
   return {
+    mode: "simulated",
     scenario: "normal",
     speed: 1,
     draft: defaultMandate(),
@@ -79,6 +83,9 @@ type Ctx = {
   wait: (ms: number) => Promise<void>;
   addTx: (tx: ChainTx) => void;
   reset: () => void;
+  /** True while a signing window (WalletModal) is open. Not persisted. */
+  signing: boolean;
+  setSigning: (open: boolean) => void;
 };
 
 const DemoContext = createContext<Ctx | null>(null);
@@ -86,6 +93,7 @@ const DemoContext = createContext<Ctx | null>(null);
 export function DemoProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<DemoState>(initialState);
   const [ready, setReady] = useState(false);
+  const [signing, setSigning] = useState(false);
   const ref = useRef(state);
 
   useEffect(() => {
@@ -130,12 +138,15 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   const wait = useCallback((ms: number) => sleep(ms / ref.current.speed), []);
   const addTx = useCallback((tx: ChainTx) => update((s) => ({ ...s, txs: [tx, ...s.txs].slice(0, 40) })), [update]);
   const reset = useCallback(() => {
-    const fresh = initialState();
+    const fresh = { ...initialState(), mode: ref.current.mode };
     ref.current = fresh;
     setState(fresh);
   }, []);
 
-  const value = useMemo(() => ({ state, ready, update, latest, wait, addTx, reset }), [state, ready, update, latest, wait, addTx, reset]);
+  const value = useMemo(
+    () => ({ state, ready, update, latest, wait, addTx, reset, signing, setSigning }),
+    [state, ready, update, latest, wait, addTx, reset, signing],
+  );
   return <DemoContext.Provider value={value}>{children}</DemoContext.Provider>;
 }
 

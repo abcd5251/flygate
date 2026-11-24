@@ -16,7 +16,7 @@ import type { PassengerInput } from "@/lib/types";
 
 export default function MandatePage() {
   const router = useRouter();
-  const { state, update, addTx, wait } = useDemo();
+  const { state, update, addTx, wait, latest } = useDemo();
   const m = state.draft;
   const [walletOpen, setWalletOpen] = useState(false);
   const signRef = useRef<SignResult | null>(null);
@@ -49,7 +49,7 @@ export default function MandatePage() {
       return `KEM ${e.kemCiphertextBytes.toLocaleString()} bytes + AES-GCM ${e.aesCiphertextBytes} bytes`;
     }
     await wait(650);
-    const tx = await getChain().setupMandate({ step: MANDATE_TX_STEPS[i - 2], mandate: m, mandateHash: signRef.current?.hash });
+    const tx = await getChain(latest().mode).setupMandate({ step: MANDATE_TX_STEPS[i - 2], mandate: m, mandateHash: signRef.current?.hash });
     addTx(tx);
     return `${tx.msg} · ${tx.hash.slice(0, 14)}…`;
   }

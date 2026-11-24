@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, KeyRound, ShieldCheck, X } from "lucide-react";
 import { ADDRESSES, shortAddr } from "@/lib/chain";
+import { useDemo } from "@/lib/store";
 import { cx, Spinner } from "./ui";
 
 export type WalletStep = { label: string; detail?: string };
@@ -25,10 +26,18 @@ export function WalletModal({ open, title, summary, steps, runStep, onDone, onCl
   const [progress, setProgress] = useState(0);
   const [details, setDetails] = useState<Record<number, string>>({});
   const dialogRef = useRef<HTMLDivElement>(null);
+  const { setSigning } = useDemo();
 
   useEffect(() => {
     if (open) dialogRef.current?.focus();
   }, [open]);
+
+  // Lets the presenter panel lock the Live/Simulated switch while a signature is in progress.
+  useEffect(() => {
+    if (!open) return;
+    setSigning(true);
+    return () => setSigning(false);
+  }, [open, setSigning]);
 
   if (!open) return null;
 

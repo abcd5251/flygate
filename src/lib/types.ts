@@ -180,3 +180,13 @@ export type AttackKey = "overspend" | "drain" | "replay" | "expired" | "qday" | 
 export type AttackState = "idle" | "running" | "blocked";
 
 export type Scenario = "normal" | "price_change" | "order_fail";
+
+/** Whether on-chain steps are simulated in the browser or sent to diana by the server. */
+export type DemoMode = "simulated" | "live";
+
+/** Public addresses the Live server signs with (D-27). Never key material. */
+export type LiveAddresses = {
+  owner: { account: { cosmos: string; evm: string }; signer: string };
+  agent: { account: { cosmos: string; evm: string }; signer: string };
+  merchant: { account: { cosmos: string; evm: string } };
+};

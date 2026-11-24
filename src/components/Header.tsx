@@ -58,6 +58,12 @@ export function Header() {
           ))}
         </nav>
         <div className="ml-auto flex items-center gap-3 text-sm">
+          {state.mode === "live" && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-pass-50 px-2.5 py-1 text-xs font-bold text-pass" title="On-chain steps are sent to the QoreChain diana testnet">
+              <span className="size-1.5 rounded-full bg-pass" />
+              Live · diana
+            </span>
+          )}
           <span className="hidden items-center gap-2 rounded-full border border-line px-3 py-1.5 text-xs text-ink-2 sm:inline-flex">
             <span className="size-2 rounded-full bg-pass" />
             QoreChain testnet

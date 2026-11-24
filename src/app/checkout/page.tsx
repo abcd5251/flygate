@@ -44,7 +44,7 @@ export default function CheckoutPage() {
   useEffect(() => {
     if (!ready || !booking || booking.status !== "running" || !offer) return;
     let cancelled = false;
-    const chain = getChain();
+    const chain = getChain(latest().mode);
 
     async function quotePayload() {
       const s = latest();

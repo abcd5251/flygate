@@ -1,5 +1,5 @@
 import { usd } from "./mandate";
-import type { ChainTx, Mandate, TxKind, TxSource } from "./types";
+import type { ChainTx, DemoMode, LiveAddresses, Mandate, TxKind, TxSource } from "./types";
 
 /**
  * Browser-safe QoreChain (diana testnet) layer: constants, `shortAddr`, the simulation helpers
@@ -76,11 +76,22 @@ export type FareCapCheck = {
   readResult?: string;
 };
 
-export type ChainStatus = { available: boolean; reason?: string; escrow: string; explorer: string };
+/**
+ * Whether this chain can run the demo. Live: what /api/live/status reports (public data only);
+ * `escrow` is the deployed FlightEscrow, never the placeholder `ADDRESSES.escrow`.
+ */
+export type ChainStatus = {
+  available: boolean;
+  reason?: string;
+  escrow?: string;
+  /** Explorer base URL; tx links are `${explorer}/tx/${hash}`. */
+  explorer: string;
+  addresses?: LiveAddresses;
+};
 
 /**
- * Every on-chain step of /mandate and /checkout goes through this port. `simulatedChain` is the
- * only implementation for now; `liveChain` (fetching /api/live/*) comes with the Live mode.
+ * Every on-chain step of /mandate and /checkout goes through this port: `simulatedChain` (makeTx)
+ * or `liveChain` (fetching /api/live/*), picked by `getChain(state.mode)`.
  */
 export interface ChainPort {
   setupMandate(input: MandateChainInput): Promise<ChainTx>;
@@ -123,7 +134,50 @@ export const simulatedChain: ChainPort = {
   },
 };
 
-/** The chain the pages use. Always simulated until the Live/Simulated switch exists. */
-export function getChain(): ChainPort {
-  return simulatedChain;
+/** Live chain operations that later tickets fill in (#20 /mandate, #21-#23 /checkout). */
+function notYetLive(op: string): never {
+  throw new Error(`Live ${op} is not available yet`);
+}
+
+/** What the browser shows when /api/live/status cannot be reached or answers 404. */
+function unavailable(reason: string): ChainStatus {
+  return { available: false, reason, explorer: CHAIN.explorer };
+}
+
+/**
+ * Live mode: every on-chain step is a fetch to /api/live/*, where the server signs and sends to
+ * diana (ADR-0001). The browser never sees keys or the SDK, only public results.
+ */
+export const liveChain: ChainPort = {
+  async setupMandate() {
+    return notYetLive("setupMandate");
+  },
+  async lockFunds() {
+    return notYetLive("lockFunds");
+  },
+  async confirmTicket() {
+    return notYetLive("confirmTicket");
+  },
+  async cancelBooking() {
+    return notYetLive("cancelBooking");
+  },
+  async checkFareCap() {
+    return notYetLive("checkFareCap");
+  },
+  async status() {
+    let res: Response;
+    try {
+      res = await fetch("/api/live/status", { cache: "no-store" });
+    } catch {
+      return unavailable("Live server unreachable");
+    }
+    if (res.status === 404) return unavailable("LIVE_MODE is not on");
+    if (!res.ok) return unavailable(`Live status failed (HTTP ${res.status})`);
+    return (await res.json()) as ChainStatus;
+  },
+};
+
+/** The chain the pages use for the current demo mode. */
+export function getChain(mode: DemoMode): ChainPort {
+  return mode === "live" ? liveChain : simulatedChain;
 }
