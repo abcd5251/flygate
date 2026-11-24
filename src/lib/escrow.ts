@@ -1,0 +1,185 @@
+import { ml_dsa87 } from "@noble/post-quantum/ml-dsa.js";
+import {
+  bytesToHex,
+  concat,
+  encodeAbiParameters,
+  hexToBytes,
+  keccak256,
+  stringToBytes,
+  stringToHex,
+  type Address,
+  type Hex,
+} from "viem";
+
+/**
+ * Shared FlightEscrow encoding: the exact bytes contracts/FlightEscrow.sol verifies, and
+ * ML-DSA-87 signing over them. Used by the e2e script, the Foundry ffi tests and, later, the
+ * frontend. The message format here is the on-chain one; it is unrelated to the demo signing
+ * format in pq.ts.
+ *
+ * message = "qorechain-msg-v1|qorechain-diana|0x"
+ *         + lowercase hex(keccak256(abi.encode(TYPE_TAG, chainId, escrow, struct)))
+ */
+
+export const DIANA_CHAIN_ID = BigInt(9800);
+export const MESSAGE_PREFIX = "qorechain-msg-v1|qorechain-diana|0x";
+export const ML_DSA_87_PUBKEY_BYTES = 2592;
+export const ML_DSA_87_SIGNATURE_BYTES = 4627;
+
+export const TYPE_TAGS = {
+  QUOTE: keccak256(stringToBytes("QUOTE")),
+  TICKET: keccak256(stringToBytes("TICKET")),
+  CANCEL: keccak256(stringToBytes("CANCEL")),
+} as const;
+export type TypeTag = keyof typeof TYPE_TAGS;
+
+/** Mirrors FlightEscrow.Cabin; the numeric value is what gets ABI-encoded. */
+export const Cabin = { Economy: 0, PremiumEconomy: 1, Business: 2, First: 3 } as const;
+export type Cabin = (typeof Cabin)[keyof typeof Cabin];
+
+/** A 3-letter city code ("TPE"), encoded as bytes3. */
+export type CityCode = string;
+
+export type Quote = {
+  merchant: Address;
+  agent: Address;
+  offerId: Hex; // bytes32
+  priceWei: bigint;
+  origin: CityCode;
+  destination: CityCode;
+  departDay: number; // unix day (uint32)
+  cabin: Cabin;
+  refundable: boolean;
+  expiresAt: bigint; // unix seconds (uint64)
+  ticketWindow: number; // seconds (uint32)
+};
+
+export type TicketProof = {
+  bookingId: Hex;
+  pnrHash: Hex;
+  issuedAt: bigint; // unix seconds (uint64)
+};
+
+export type CancelProof = {
+  bookingId: Hex;
+  reasonCode: number; // uint8
+};
+
+const quoteAbi = [
+  {
+    type: "tuple",
+    components: [
+      { name: "merchant", type: "address" },
+      { name: "agent", type: "address" },
+      { name: "offerId", type: "bytes32" },
+      { name: "priceWei", type: "uint256" },
+      { name: "origin", type: "bytes3" },
+      { name: "destination", type: "bytes3" },
+      { name: "departDay", type: "uint32" },
+      { name: "cabin", type: "uint8" },
+      { name: "refundable", type: "bool" },
+      { name: "expiresAt", type: "uint64" },
+      { name: "ticketWindow", type: "uint32" },
+    ],
+  },
+] as const;
+
+const ticketAbi = [
+  {
+    type: "tuple",
+    components: [
+      { name: "bookingId", type: "bytes32" },
+      { name: "pnrHash", type: "bytes32" },
+      { name: "issuedAt", type: "uint64" },
+    ],
+  },
+] as const;
+
+const cancelAbi = [
+  {
+    type: "tuple",
+    components: [
+      { name: "bookingId", type: "bytes32" },
+      { name: "reasonCode", type: "uint8" },
+    ],
+  },
+] as const;
+
+function cityCode(code: CityCode): Hex {
+  if (!/^[A-Z]{3}$/.test(code)) throw new Error(`city code must be 3 uppercase letters: ${code}`);
+  return stringToHex(code, { size: 3 });
+}
+
+/** abi.encode(quote), as Solidity encodes a FlightEscrow.Quote. */
+export function encodeQuote(q: Quote): Hex {
+  return encodeAbiParameters(quoteAbi, [
+    { ...q, origin: cityCode(q.origin), destination: cityCode(q.destination) },
+  ]);
+}
+
+/** abi.encode(proof), as Solidity encodes a FlightEscrow.TicketProof. */
+export function encodeTicketProof(t: TicketProof): Hex {
+  return encodeAbiParameters(ticketAbi, [t]);
+}
+
+/** abi.encode(proof), as Solidity encodes a FlightEscrow.CancelProof. */
+export function encodeCancelProof(c: CancelProof): Hex {
+  return encodeAbiParameters(cancelAbi, [c]);
+}
+
+/** bookingId = keccak256(abi.encode(quote)); known before the booking tx lands. */
+export function bookingId(q: Quote): Hex {
+  return keccak256(encodeQuote(q));
+}
+
+/** Where a signature is valid: the chain and the FlightEscrow deployment. */
+export type Domain = { chainId: bigint; escrow: Address };
+
+/** The exact message bytes the contract hands to pqcVerify (FlightEscrow.signedMessage). */
+export function signedMessage(tag: TypeTag, encodedStruct: Hex, domain: Domain): Uint8Array {
+  const head = encodeAbiParameters(
+    [{ type: "bytes32" }, { type: "uint256" }, { type: "address" }],
+    [TYPE_TAGS[tag], domain.chainId, domain.escrow],
+  );
+  const digest = keccak256(concat([head, encodedStruct]));
+  return stringToBytes(MESSAGE_PREFIX + digest.slice(2));
+}
+
+export const quoteMessage = (q: Quote, d: Domain) => signedMessage("QUOTE", encodeQuote(q), d);
+export const ticketMessage = (t: TicketProof, d: Domain) =>
+  signedMessage("TICKET", encodeTicketProof(t), d);
+export const cancelMessage = (c: CancelProof, d: Domain) =>
+  signedMessage("CANCEL", encodeCancelProof(c), d);
+
+export type MerchantKeys = { publicKey: Uint8Array; secretKey: Uint8Array };
+
+/** Deterministic ML-DSA-87 keypair from a 32-byte seed. */
+export function merchantKeys(seed: Hex | Uint8Array): MerchantKeys {
+  const bytes = typeof seed === "string" ? hexToBytes(seed) : seed;
+  if (bytes.length !== 32) throw new Error("ML-DSA-87 seed must be 32 bytes");
+  return ml_dsa87.keygen(bytes);
+}
+
+/**
+ * ML-DSA-87 signature over raw message bytes (pqcVerify adds no prefix or hash).
+ * Deterministic (no extra entropy), so the same inputs always give the same signature.
+ */
+export function signMessage(message: Uint8Array, secretKey: Uint8Array): Hex {
+  return bytesToHex(ml_dsa87.sign(message, secretKey, { extraEntropy: false }));
+}
+
+/** What pqcVerify computes on chain, for local checks. */
+export function verifyMessage(publicKey: Hex, signature: Hex, message: Uint8Array): boolean {
+  try {
+    return ml_dsa87.verify(hexToBytes(signature), message, hexToBytes(publicKey));
+  } catch {
+    return false;
+  }
+}
+
+export const signQuote = (q: Quote, d: Domain, keys: MerchantKeys) =>
+  signMessage(quoteMessage(q, d), keys.secretKey);
+export const signTicketProof = (t: TicketProof, d: Domain, keys: MerchantKeys) =>
+  signMessage(ticketMessage(t, d), keys.secretKey);
+export const signCancelProof = (c: CancelProof, d: Domain, keys: MerchantKeys) =>
+  signMessage(cancelMessage(c, d), keys.secretKey);

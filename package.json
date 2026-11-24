@@ -9,7 +9,9 @@
     "lint": "eslint",
     "bootstrap": "tsx scripts/bootstrap/index.ts",
     "evm:check": "tsx scripts/evm/check.ts",
-    "test:scripts": "tsx --test 'scripts/**/*.test.ts'"
+    "test:scripts": "tsx --test 'scripts/**/*.test.ts'",
+    "test:contracts": "forge test",
+    "test:contracts:ffi": "FOUNDRY_PROFILE=ffi forge test"
   },
   "dependencies": {
     "@noble/post-quantum": "^0.7.1",
@@ -17,7 +19,8 @@
     "lucide-react": "^1.78.0",
     "next": "16.4.6",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "viem": "^2.58.6"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "4.3.3",
