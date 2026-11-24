@@ -242,6 +242,10 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
       nowMs: clock.now(),
     });
     const domain: Domain = { chainId: DIANA_CHAIN_ID, escrow: live.escrow };
+    // bookingId hashes the quote, which has no nonce: two quotes for the same offer in the same
+    // second (e.g. Ticketed, then Booking fails) would share an id, and with it the first one's
+    // idempotent lock/proof/cancel results. Move expiresAt on by a second until the id is new.
+    while (quotes.has(bookingIdOf(q))) q.expiresAt += BigInt(1);
     // The merchant's bootstrap-registered key, the one pqcKeyStatus returns (D-32).
     const signature = signMessage(quoteMessage(q, domain), k.merchantPqc.secretKey);
     const id = bookingIdOf(q);

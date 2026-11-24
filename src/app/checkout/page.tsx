@@ -19,7 +19,13 @@ const ACTOR_LABEL = { merchant: "Merchant", chain: "Chain", agent: "Agent", gate
 const ACTOR_TONE = { merchant: "muted", chain: "pq", agent: "brand", gate: "pass" } as const;
 const REAL_CRYPTO: BookingStepKey[] = ["quote", "verify", "proof"];
 /** Live steps that broadcast: after a reload they are looked up on-chain, never just resent (D-28). */
-const RECOVERABLE: BookingStepKey[] = ["lock", "proof"];
+const RECOVERABLE: BookingStepKey[] = ["lock", "proof", "refund"];
+
+/**
+ * A failed step that stops the run. The order step's Duffel failure is the Booking fails
+ * scenario, not a failure of the run: the refund step follows it.
+ */
+const stopsRun = (st: BookingStep) => st.status === "failed" && st.key !== "order";
 
 /** The step fields that come from a chain tx: its hash, where it came from and its explorer link. */
 function txStep(tx: ChainTx): Pick<BookingStep, "hash" | "source" | "explorerUrl"> {
@@ -78,6 +84,19 @@ export default function CheckoutPage() {
       return { offerId: offer!.id, scenario: s.booking!.scenario, mandate: s.draft, mandateHash: s.signed?.hash };
     }
 
+    /** The refund step is done: the booking ends refunded and the budget gives the fare back. */
+    function refunded(amount: number, patch: Partial<BookingStep>) {
+      update((st) => ({
+        ...st,
+        scenario: "normal",
+        spentUsd: Math.max(0, st.spentUsd - amount),
+        refundedUsd: st.refundedUsd + amount,
+        booking: st.booking
+          ? { ...st.booking, status: "refunded", steps: st.booking.steps.map((x) => (x.key === "refund" ? { ...x, ...patch } : x)) }
+          : st.booking,
+      }));
+    }
+
     /**
      * After a reload, a Live step left "running" may already be on-chain: ask diana where the
      * booking stands (Booked / Released / Refunded events) instead of sending it again (D-28).
@@ -128,6 +147,13 @@ export default function CheckoutPage() {
         });
         return "next";
       }
+      if (key === "refund" && r.state === "Refunded" && r.refunded) {
+        const amount = b.quotedPriceUsd ?? b.priceUsd;
+        addTx(found(`Refund ${usd(amount)}`, "FlightEscrow.cancel()", r.refunded));
+        const detail = `${b.priceQor ?? "?"} QOR back to your refund address · found on-chain after a reload (Refunded event)`;
+        refunded(amount, { status: "done", detail, actor: "merchant", msg: "FlightEscrow.cancel()", hash: r.refunded.hash, explorerUrl: r.refunded.explorerUrl, source: "live", at: Date.now() });
+        return "stop";
+      }
       if (key === "proof" && r.state === "Refunded") {
         setStep(key, { status: "failed", detail: "Booking already refunded on-chain (Refunded event); nothing was sent", actor: "merchant", source: "live", at: Date.now() });
         return "stop";
@@ -141,7 +167,7 @@ export default function CheckoutPage() {
       const m = s.draft;
       setStep(key, { status: "running" });
       // The minimum animation time; a Live step then also waits for the chain (D-30).
-      await wait(key === "order" ? 1500 : 1000);
+      await wait(key === "order" ? 1500 : key === "refund" ? 1200 : 1000);
       if (cancelled) return "stop";
 
       switch (key) {
@@ -203,46 +229,34 @@ export default function CheckoutPage() {
         }
         case "order": {
           if (b.scenario === "order_fail") {
+            // The refund runs as its own step, so a reload or "Finish in Simulated mode" can resume it.
             setStep(key, { status: "failed", detail: "Duffel: offer_no_longer_available (sold out)", at: Date.now() });
-            patchBooking((bk) => ({ ...bk, steps: [...bk.steps.filter((st) => st.status !== "pending"), { key: "refund", status: "running" }] }));
-            await wait(1200);
-            if (cancelled) return "stop";
-            const amount = b.quotedPriceUsd ?? b.priceUsd;
-            const r = await chain.cancelBooking({ offerId: offer!.id, amountUsd: amount, bookingId: b.bookingId });
-            const tx = r.tx;
-            if (tx.source === "live" && !tx.ok) {
-              // The fare stays locked; FlightEscrow refunds it once the ticket window passes (D-26).
-              const f = failedTx(tx);
-              setStep("refund", { ...f, actor: "merchant", detail: `${f.detail} · booking ${b.bookingId ?? "?"}: refunds after the ticket window` });
-              return "stop";
-            }
-            addTx(tx);
-            // Live: the merchant signed the CancelProof, the agent EOA submitted cancel() (D-19),
-            // then one balance read of the refund address shows the money is back (D-18, D-10).
-            const refundDetail =
-              tx.source === "live"
-                ? `${b.priceQor ?? "?"} QOR back to your refund address ${shortAddr(r.refundTo ?? "", 8, 4)} · submitted by agent · ${r.balanceQor ? `balance now ${r.balanceQor}` : (r.readError ?? "balance not read")}`
-                : `${amount} fUSD back to ${shortAddr(ADDRESSES.owner, 8, 4)}`;
-            const liveFields: Partial<BookingStep> = tx.source === "live" ? { actor: "merchant", msg: "FlightEscrow.cancel()", readResult: r.readResult } : {};
-            update((st) => ({
-              ...st,
-              scenario: "normal",
-              spentUsd: Math.max(0, st.spentUsd - amount),
-              refundedUsd: st.refundedUsd + amount,
-              booking: st.booking
-                ? {
-                    ...st.booking,
-                    status: "refunded",
-                    steps: st.booking.steps.map((x) =>
-                      x.key === "refund" ? { ...x, status: "done", detail: refundDetail, ...liveFields, ...txStep(tx), at: Date.now() } : x,
-                    ),
-                  }
-                : st.booking,
-            }));
-            return "stop";
+            patchBooking((bk) => ({ ...bk, steps: [...bk.steps.filter((st) => st.status !== "pending"), { key: "refund", status: "pending" }] }));
+            return "next";
           }
           setStep(key, { status: "done", detail: `Duffel order ord_${fakeHash().slice(2, 14)} created (test mode)`, at: Date.now() });
           return "next";
+        }
+        case "refund": {
+          const amount = b.quotedPriceUsd ?? b.priceUsd;
+          const r = await chain.cancelBooking({ offerId: offer!.id, amountUsd: amount, bookingId: b.bookingId });
+          if (cancelled) return "stop";
+          const tx = r.tx;
+          if (tx.source === "live" && !tx.ok) {
+            // The fare stays locked; the failure callout shows the bookingId and when it refunds (D-26).
+            setStep(key, { ...failedTx(tx), actor: "merchant" });
+            return "stop";
+          }
+          addTx(tx);
+          // Live: the merchant signed the CancelProof, the agent EOA submitted cancel() (D-19),
+          // then one balance read of the refund address shows the money is back (D-18, D-10).
+          const detail =
+            tx.source === "live"
+              ? `${b.priceQor ?? "?"} QOR back to your refund address ${shortAddr(r.refundTo ?? "", 8, 4)} · submitted by agent · ${r.balanceQor ? `balance now ${r.balanceQor}` : (r.readError ?? "balance not read")}`
+              : `${amount} fUSD back to ${shortAddr(ADDRESSES.owner, 8, 4)}`;
+          const liveFields: Partial<BookingStep> = tx.source === "live" ? { actor: "merchant", msg: "FlightEscrow.cancel()", readResult: r.readResult } : {};
+          refunded(amount, { status: "done", detail, ...liveFields, ...txStep(tx), at: Date.now() });
+          return "stop";
         }
         case "ticket": {
           const pnr = fakePnr();
@@ -325,7 +339,7 @@ export default function CheckoutPage() {
         const b = latest().booking;
         if (!b || b.status !== "running") return;
         // A failed step ends the run; nothing after it runs (also after a reload).
-        if (b.steps.some((st) => st.status === "failed")) return;
+        if (b.steps.some(stopsRun)) return;
         const next = b.steps.find((st) => st.status === "pending" || st.status === "running");
         if (!next) return;
         // Only a step left over from before a reload is "running" here.
@@ -380,7 +394,7 @@ export default function CheckoutPage() {
   const liveDone = (key: BookingStepKey) => booking.steps.some((s) => s.key === key && s.status === "done" && s.source === "live" && !!s.hash);
   // A Live step failed (timeout, RPC error, revert): no silent fallback, the presenter decides (D-26).
   // The order step's Duffel failure is a scenario, not a Live failure.
-  const liveFailed = state.mode === "live" && booking.status === "running" ? booking.steps.find((s) => s.status === "failed" && s.key !== "order") : undefined;
+  const liveFailed = state.mode === "live" && booking.status === "running" ? booking.steps.find(stopsRun) : undefined;
   // book() succeeded on diana but neither payout nor refund did: the QOR waits in FlightEscrow.
   const stuckInEscrow = liveDone("lock") && !liveDone("proof") && !liveDone("refund") && (!!liveFailed || !!booking.fallback);
 
@@ -388,7 +402,7 @@ export default function CheckoutPage() {
   function finishSimulated() {
     update((s) => {
       const b = s.booking;
-      const failed = b?.steps.find((st) => st.status === "failed");
+      const failed = b?.steps.find(stopsRun);
       if (!b || !failed) return s;
       return {
         ...s,

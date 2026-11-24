@@ -101,7 +101,7 @@ export default function TicketPage() {
               <h2 className="text-lg font-bold text-ink">Proofs</h2>
               <p className="text-sm text-muted">
                 {anyLive
-                  ? "Signatures and encryption are computed for real. Escrow payment and payout are transactions on the diana testnet."
+                  ? "Signatures and encryption are computed for real. Rows tagged “Live tx · diana” are transactions on the diana testnet; the rest are simulated."
                   : "Signatures and encryption are computed for real. Chain transactions are simulated in this demo."}
               </p>
             </div>

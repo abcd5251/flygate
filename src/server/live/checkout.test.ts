@@ -177,6 +177,20 @@ test("the same (step, bookingId) twice broadcasts once, also when the calls over
   assert.deepEqual(p2, p1);
 });
 
+test("two quotes for the same offer in the same second get different bookingIds, so a new booking is not answered from the old one's cache", async () => {
+  const chain = await healthyChain();
+  const svc = service(chain);
+  const ticketedQuote = await quoteOf(svc, "normal");
+  await lockOf(svc, ticketedQuote.bookingId);
+  const failsQuote = await quoteOf(svc, "order_fail");
+  assert.notEqual(failsQuote.bookingId, ticketedQuote.bookingId);
+  await lockOf(svc, failsQuote.bookingId);
+  assert.equal(chain.broadcasts().length, 2, "the second booking's book() is sent, not taken from the first one's cache");
+  const { quote } = decodeBook(bytesToHex(execMsg(chain, 1).data));
+  assert.equal(bookingId({ ...quote, cabin: quote.cabin as 0, origin: hexToString(quote.origin), destination: hexToString(quote.destination) }), failsQuote.bookingId);
+  assert.equal(quote.expiresAt, BigInt(NOW_MS / 1000 + 20 * 60 + 1), "only expiresAt moved, by one second");
+});
+
 test("a failed broadcast is never resent: the repeat gets the failure", async () => {
   const chain = await healthyChain();
   chain.state.outcomes.push({ mode: "failed", code: "pqc 21", reason: "hybrid_verify_failed" });

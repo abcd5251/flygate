@@ -1,5 +1,5 @@
 // Eth-native Cosmos txs from a coin-60 signer (register its ML-DSA-87 key, open a window), sent
-// once over REST. Same approach as `pnpm live:probe` (probe.ts keeps its own copy for now).
+// once over REST. Shared by `pnpm live:probe` and `pnpm live:sweep`.
 // The broadcast is never retried; only the account lookup and the inclusion wait are reads.
 import {
   buildRegisterPqcKeyMsg,
@@ -79,11 +79,11 @@ export function registerSignerPqc(ctx: EthNativeCtx, who: UnifiedAccount): Promi
   return sendEthNative(ctx, who, "classical", [msg], REGISTER_GAS);
 }
 
-/** Open a window on the signer, scoped to `targets`. Hybrid-signed. */
+/** Open a window on the signer, scoped to `allowedTargets` when given. Hybrid-signed. */
 export function openSignerWindow(
   ctx: EthNativeCtx,
   who: UnifiedAccount,
-  window: { blocks: number; maxTxs: number; maxValue: string; allowedTargets: string[] },
+  window: { blocks: number; maxTxs: number; maxValue: string; allowedTargets?: string[] },
 ): Promise<string> {
   const msg = openEvmWindowMsg({ sender: who.cosmos, ...window });
   return sendEthNative(ctx, who, "hybrid", [msg], WINDOW_GAS);

@@ -28,11 +28,9 @@ import {
   assertAuthenticatorExecutionsSucceeded,
   AuthenticatorExecutionError,
   buildMetaMaskExecuteEvm,
-  buildRegisterPqcKeyMsg,
   classifyEvmWindowRejection,
   closeEvmWindowMsg,
   deriveUnifiedAccount,
-  EthNativeSigner,
   fetchAuthenticators,
   fetchAuthNonce,
   fetchEvmWindow,
@@ -43,10 +41,7 @@ import {
   QoreTxError,
   resolveEvmAuthDigestVersion,
   signAuthenticatorLinkEip191,
-  signProofOfPossession,
   VERSION,
-  waitForTx,
-  type EthBroadcaster,
   type QoreChainClient,
   type TxClient,
   type UnifiedAccount,
@@ -81,7 +76,6 @@ import {
   describeSenderStep,
   errorText,
   explorerTxUrl,
-  feeUqor,
   judgeExecuteSender,
   judgeExplorer,
   judgePqcVerify,
@@ -102,6 +96,7 @@ import {
   type TxRef,
   type Verdict,
 } from "./probe-lib";
+import { openSignerWindow, registerSignerPqc, type EthNativeCtx } from "./eth-native";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const ENV_PATH = join(ROOT, ".env.local");
@@ -116,9 +111,6 @@ const SIGNER_MIN = BigInt(2) * QOR;
 const EXEC_VALUE_UQOR = BigInt(1_000);
 const EXEC_GAS_LIMIT = 200_000;
 /** Explicit gas for the eth-native Cosmos txs (registration carries a 2592-byte key + 4627-byte proof). */
-const REGISTER_GAS = 1_000_000;
-const WINDOW_GAS = 500_000;
-const GAS_PRICE_UQOR = "0.15";
 /** Signer windows: ~20 minutes, a few txs, 2 QOR including fees. */
 const SIGNER_WINDOW = { blocks: 1_200, maxTxs: 5, maxValue: (BigInt(2) * QOR).toString() };
 /** A target no one calls: the window that only admits it must not admit the probe. */
@@ -165,56 +157,8 @@ function setItem(ctx: Ctx, id: ItemId, verdict: Verdict, summary: string, eviden
 
 // ------------------------------------------------------------------ cosmos helpers
 
-/** Account number and sequence over REST (an eth-native account's pubkey type is not cosmjs's). */
-async function accountSequence(ctx: Ctx, address: string): Promise<{ accountNumber: bigint; sequence: bigint }> {
-  type Acc = { account_number?: string; sequence?: string; base_account?: Acc };
-  const body = await retrying(() => ctx.client.rest.get<{ account?: Acc }>(`/cosmos/auth/v1beta1/accounts/${address}`));
-  const acc = body.account?.base_account ?? body.account;
-  if (!acc?.account_number) throw new Error(`No account record for ${address} (fund it first)`);
-  return { accountNumber: BigInt(acc.account_number), sequence: BigInt(acc.sequence ?? "0") };
-}
-
-/** Raw tx bytes -> REST broadcast (sync, once) -> wait for inclusion (a read, so retried). */
-function restBroadcaster(ctx: Ctx): EthBroadcaster {
-  return {
-    async broadcastTx(tx: Uint8Array) {
-      const res = await fetch(`${ctx.env.network.rest}/cosmos/tx/v1beta1/txs`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tx_bytes: Buffer.from(tx).toString("base64"), mode: "BROADCAST_MODE_SYNC" }),
-      });
-      if (!res.ok) throw new Error(`broadcast: HTTP ${res.status} (not resent)`);
-      const body = (await res.json()) as { tx_response?: { code: number; txhash: string; raw_log?: string; codespace?: string } };
-      const t = body.tx_response;
-      if (!t) throw new Error("broadcast: no tx_response (not resent)");
-      if (t.code !== 0) return { code: t.code, transactionHash: t.txhash, rawLog: `${t.codespace ?? ""} ${t.raw_log ?? ""}`.trim() };
-      const included = await retrying(() => waitForTx(ctx.client.rest, t.txhash, { timeoutMs: 60_000, pollIntervalMs: 1_500 }));
-      return { code: included.code, transactionHash: included.txHash, height: included.height, rawLog: included.rawLog };
-    },
-  };
-}
-
-const stdFee = (gas: number) => ({ amount: [{ denom: "uqor", amount: feeUqor(gas, GAS_PRICE_UQOR).toString() }], gas: String(gas) });
-
-/** One eth-native Cosmos tx from a coin-60 signer. Broadcast once; throws on a non-zero code. */
-async function sendEthNative(
-  ctx: Ctx,
-  who: UnifiedAccount,
-  mode: "classical" | "hybrid",
-  messages: ReturnType<typeof openEvmWindowMsg>[],
-  gas: number,
-): Promise<string> {
-  const signer = new EthNativeSigner(who, { signMode: mode, signBytesVersion: "auto", rest: ctx.env.network.rest });
-  const seq = await accountSequence(ctx, who.cosmos);
-  const res = await signer.signAndBroadcast(restBroadcaster(ctx), {
-    chainId: ctx.env.network.chainId,
-    messages,
-    fee: stdFee(gas),
-    ...seq,
-  });
-  if (res.code !== 0) throw new Error(`code ${res.code} ${res.transactionHash}: ${res.rawLog ?? ""}`);
-  return res.transactionHash;
-}
+/** The eth-native helpers (scripts/live/eth-native.ts) need only the client and the network. */
+const ethNative = (ctx: Ctx): EthNativeCtx => ({ client: ctx.client, rest: ctx.env.network.rest, chainId: ctx.env.network.chainId });
 
 async function ownerBroadcast(tx: TxClient, messages: ReturnType<typeof openEvmWindowMsg>[]): Promise<string> {
   const res = await tx.signAndBroadcast(messages, "auto");
@@ -249,14 +193,12 @@ async function sendWithPrerequisites(
       steps.push({ kind: "refused", rejection, error: errorText(err) });
       try {
         if (rejection === "no-pqc-key" && !steps.some((s) => s.kind === "registered-pqc")) {
-          const proof = signProofOfPossession({ chainId: ctx.env.network.chainId, account: who.cosmos, keypair: who.pqc, algorithmId: 1 });
-          const msg = buildRegisterPqcKeyMsg(who.cosmos, { pqcKeypair: who.pqc, proofOfPossession: proof });
-          steps.push({ kind: "registered-pqc", hash: await sendEthNative(ctx, who, "classical", [msg], REGISTER_GAS) });
+          steps.push({ kind: "registered-pqc", hash: await registerSignerPqc(ethNative(ctx), who) });
           continue;
         }
         if ((rejection === "no-window" || rejection === "exhausted") && !steps.some((s) => s.kind === "opened-window")) {
-          const msg = openEvmWindowMsg({ sender: who.cosmos, ...SIGNER_WINDOW, ...(windowTargets ? { allowedTargets: windowTargets } : {}) });
-          steps.push({ kind: "opened-window", hash: await sendEthNative(ctx, who, "hybrid", [msg], WINDOW_GAS) });
+          const window = { ...SIGNER_WINDOW, ...(windowTargets ? { allowedTargets: windowTargets } : {}) };
+          steps.push({ kind: "opened-window", hash: await openSignerWindow(ethNative(ctx), who, window) });
           continue;
         }
       } catch (fixErr) {
