@@ -11,3 +11,11 @@ optimizer_runs = 200
 via_ir = false
 evm_version = "cancun"
 remappings = ["forge-std/=contracts/lib/forge-std/src/"]
+# The ffi cross-check tests (contracts/test/ffi) shell out to `tsx scripts/escrow-ffi.ts`, so they
+# need `pnpm install` and ffi; keep them out of the default run. Run: `pnpm test:contracts:ffi`.
+no_match_path = "contracts/test/ffi/**"
+
+[profile.ffi]
+ffi = true
+match_path = "contracts/test/ffi/**"
+no_match_path = "contracts/test/mocks/**"
