@@ -11,6 +11,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
+import { DIANA_EVM_CHAIN_ID } from "./chain";
 
 /**
  * Shared FlightEscrow encoding: the exact bytes contracts/FlightEscrow.sol verifies, and
@@ -22,7 +23,7 @@ import {
  *         + lowercase hex(keccak256(abi.encode(TYPE_TAG, chainId, escrow, struct)))
  */
 
-export const DIANA_CHAIN_ID = BigInt(9800);
+export const DIANA_CHAIN_ID = BigInt(DIANA_EVM_CHAIN_ID);
 export const MESSAGE_PREFIX = "qorechain-msg-v1|qorechain-diana|0x";
 export const ML_DSA_87_PUBKEY_BYTES = 2592;
 export const ML_DSA_87_SIGNATURE_BYTES = 4627;

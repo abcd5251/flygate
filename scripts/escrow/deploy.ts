@@ -2,7 +2,7 @@
 // deploy FlightEscrow. Every step reads the chain first and is skipped when already done;
 // rerun after any failure.
 //   1. Bank sends (hybrid-signed): owner qor1 -> owner signer, agent qor1 -> agent signer,
-//      only when the signer is below its minimum.
+//      only the shortfall below what one run needs (SIGNER_NEED_UQOR).
 //   2. ML-DSA-87 key with proof of possession for each signer (MsgRegisterPQCKeyV2).
 //   3. Owner signer EVM window sized for the CREATE plus one setMandate (MsgOpenEVMWindow).
 //   4. `forge script contracts/script/DeployFlightEscrow.s.sol` simulates the deploy from the
@@ -11,29 +11,29 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { getAddress, getContractAddress } from "viem";
+import { getAddress, getContractAddress, type Hex } from "viem";
+import { DIANA_EVM_CHAIN_ID } from "../../src/lib/chain";
 import { balanceOf, connect, DENOM, deriveRole, formatQor, makeClient } from "../bootstrap/chain";
 import type { Role } from "../bootstrap/env";
 import { loadEvmSetup, type EvmSetup } from "../evm/chain";
-import type { Hex } from "../evm/keys";
-import { GAS_CAP, ownerDeployWindow } from "./budget";
+import { GAS_CAP, ownerDeployWindow, SIGNER_NEED_UQOR } from "./budget";
 import { topUpAmount, type TopUpRule } from "./plan";
-import { explorerTx, readRecord, writeRecord, type DeploymentRecord } from "./record";
+import { readRecord, txRecord, writeRecord, type DeploymentRecord } from "./record";
 import { openWindow, registerSigner } from "./signers";
 import { makeClients, sendTx, walletFor } from "./tx";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const SCRIPT = "contracts/script/DeployFlightEscrow.s.sol";
-const DRY_RUN_LOG = resolve(ROOT, "broadcast/DeployFlightEscrow.s.sol/9800/dry-run/run-latest.json");
+const DRY_RUN_LOG = resolve(ROOT, `broadcast/DeployFlightEscrow.s.sol/${DIANA_EVM_CHAIN_ID}/dry-run/run-latest.json`);
 
-const QOR = BigInt(1_000_000);
 /**
- * Owner signer: deploy + setMandate gas, and it receives every refund.
+ * Owner signer: deploy + setMandate gas (it also receives every refund).
  * Agent signer: three 1-QOR fares plus gas per e2e run.
+ * Topped up only by the shortfall, so a funded signer is never sent more.
  */
 const SIGNER_FUNDING: Partial<Record<Role, TopUpRule>> = {
-  owner: { min: QOR, target: BigInt(2) * QOR },
-  agent: { min: BigInt(4) * QOR, target: BigInt(5) * QOR },
+  owner: { min: SIGNER_NEED_UQOR.owner, target: SIGNER_NEED_UQOR.owner },
+  agent: { min: SIGNER_NEED_UQOR.agent, target: SIGNER_NEED_UQOR.agent },
 };
 
 async function fundSigners(setup: EvmSetup, record: DeploymentRecord): Promise<void> {
@@ -56,11 +56,7 @@ async function fundSigners(setup: EvmSetup, record: DeploymentRecord): Promise<v
       record.funding.push({
         label: `${role} account -> ${role} EVM signer`,
         amountUqor: amount.toString(),
-        tx: {
-          hash: res.transactionHash,
-          block: Number(res.height ?? 0),
-          url: explorerTx(setup.network.explorer, res.transactionHash),
-        },
+        tx: txRecord(setup.network.explorer, { hash: res.transactionHash, block: res.height ?? 0 }),
       });
       writeRecord(record);
     } finally {
@@ -98,9 +94,12 @@ async function deploy(setup: EvmSetup, record: DeploymentRecord): Promise<void> 
     }
   }
   // A CREATE that landed without being recorded would sit at one of the signer's past nonces.
+  // Superseded deployments are known and expected there.
+  const known = new Set((record.superseded ?? []).map((s) => s.contract.address.toLowerCase()));
   const nonce = await reads.getTransactionCount({ address: signer.address, blockTag: "latest" });
   for (let n = 0; n < nonce; n++) {
     const address = getContractAddress({ from: signer.address, nonce: BigInt(n) });
+    if (known.has(address.toLowerCase())) continue;
     const code = await reads.getCode({ address });
     if (code && code !== "0x") throw new Error(`Owner signer already created ${address} (nonce ${n}); record it by hand.`);
   }
@@ -118,12 +117,11 @@ async function deploy(setup: EvmSetup, record: DeploymentRecord): Promise<void> 
   record.contract = {
     address: getAddress(receipt.contractAddress),
     deployer: signer.address,
-    deployTx: {
+    deployTx: txRecord(setup.network.explorer, {
       hash: receipt.transactionHash,
-      block: Number(receipt.blockNumber),
-      gasUsed: Number(receipt.gasUsed),
-      url: explorerTx(setup.network.explorer, receipt.transactionHash),
-    },
+      block: receipt.blockNumber,
+      gasUsed: receipt.gasUsed,
+    }),
   };
   writeRecord(record);
   console.log(`FlightEscrow ${receipt.contractAddress} (block ${receipt.blockNumber}, ${receipt.gasUsed} gas)`);

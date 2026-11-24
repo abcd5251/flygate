@@ -7,9 +7,9 @@
 // proofs. The merchant signs quotes and proofs with its registered ML-DSA-87 key
 // (derivePqcCanonical) and sends nothing. Flows already in the record are skipped.
 import { derivePqcCanonical, fromBase } from "@qorechain/sdk";
-import { bytesToHex, keccak256, parseEventLogs, stringToBytes, type TransactionReceipt } from "viem";
-import { evmBalance, loadEvmSetup, pqcKeyStatusOnEvm, WEI_PER_UQOR, type EvmSetup } from "../evm/chain";
-import type { Hex } from "../evm/keys";
+import { bytesToHex, keccak256, parseEventLogs, stringToBytes, type Hex, type TransactionReceipt } from "viem";
+import { WEI_PER_UQOR } from "../../src/lib/chain";
+import { evmBalance, loadEvmSetup, pqcKeyStatusOnEvm, type EvmSetup } from "../evm/chain";
 import {
   bookingId as bookingIdOf,
   Cabin,
@@ -28,7 +28,7 @@ import {
   type TicketProof,
 } from "../../src/lib/escrow";
 import { agentWindow, FARE_WEI, GAS_CAP, ownerMandateWindow } from "./budget";
-import { explorerTx, readRecord, writeRecord, type DeploymentRecord, type FlowRecord, type TxRecord } from "./record";
+import { readRecord, txRecord as recordTx, writeRecord, type DeploymentRecord, type FlowRecord, type TxRecord } from "./record";
 import { openWindow } from "./signers";
 import { makeClients, sendContractTx, walletFor, type Clients, type Wallet } from "./tx";
 
@@ -50,14 +50,8 @@ interface Ctx {
   agent: Wallet;
 }
 
-function txRecord(ctx: Ctx, r: TransactionReceipt): TxRecord {
-  return {
-    hash: r.transactionHash,
-    block: Number(r.blockNumber),
-    gasUsed: Number(r.gasUsed),
-    url: explorerTx(ctx.setup.network.explorer, r.transactionHash),
-  };
-}
+const txRecord = (ctx: Ctx, r: TransactionReceipt): TxRecord =>
+  recordTx(ctx.setup.network.explorer, { hash: r.transactionHash, block: r.blockNumber, gasUsed: r.gasUsed });
 
 function log(label: string, t: TxRecord) {
   console.log(`  ${label.padEnd(14)} ${t.hash}  block ${t.block}  ${t.gasUsed} gas`);
@@ -266,6 +260,8 @@ async function main(): Promise<void> {
 
   const f = record.flows;
   record.gas = {
+    deploy: gasOf(record.contract.deployTx),
+    setMandate: gasOf(record.mandate?.tx),
     book: gasOf(f.confirm?.book),
     confirmTicket: gasOf(f.confirm?.confirmTicket),
     cancel: gasOf(f.cancel?.cancel),

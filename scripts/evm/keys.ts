@@ -12,9 +12,8 @@
 //            setMandate, book); msg.sender is this address. A separate account that
 //            must be funded on its own.
 import { deriveEvmAccount, deriveNativeAccount, qoreAddresses } from "@qorechain/sdk";
+import { bytesToHex, type Hex } from "viem";
 import type { Role } from "../bootstrap/env";
-
-export type Hex = `0x${string}`;
 
 export interface EvmRole {
   role: Role;
@@ -23,8 +22,6 @@ export interface EvmRole {
   /** The EVM-signing key (coin 60). `privateKey` is a secret: never log it. */
   signer: { cosmos: string; address: Hex; privateKey: Hex };
 }
-
-const toHex = (bytes: Uint8Array): Hex => `0x${Buffer.from(bytes).toString("hex")}`;
 
 export async function deriveEvmRole(role: Role, mnemonic: string): Promise<EvmRole> {
   const native = await deriveNativeAccount(mnemonic);
@@ -35,7 +32,7 @@ export async function deriveEvmRole(role: Role, mnemonic: string): Promise<EvmRo
     signer: {
       cosmos: qoreAddresses({ evm: evm.address }).cosmos,
       address: evm.address as Hex,
-      privateKey: toHex(evm.privateKey),
+      privateKey: bytesToHex(evm.privateKey),
     },
   };
 }

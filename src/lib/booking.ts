@@ -1,5 +1,6 @@
 import type { Booking, BookingStepKey, Offer, Scenario } from "./types";
 
+/** The one place step titles and their contract calls are named; checkout and ticket read from here. */
 export const STEP_META: Record<BookingStepKey, { title: string; actor: "merchant" | "chain" | "agent" | "gate"; msg?: string }> = {
   quote: { title: "Merchant signs the quote", actor: "merchant", msg: "ML-DSA-87" },
   verify: { title: "Contract verifies the signature", actor: "chain", msg: "pqcVerify 0x…0a01" },
@@ -8,8 +9,8 @@ export const STEP_META: Record<BookingStepKey, { title: string; actor: "merchant
   order: { title: "Merchant books with Duffel", actor: "merchant", msg: "POST /air/orders" },
   ticket: { title: "Airline issues the ticket", actor: "merchant" },
   proof: { title: "Contract verifies the ticket proof", actor: "chain", msg: "FlightEscrow.confirmTicket()" },
-  release: { title: "Escrow pays the merchant", actor: "chain", msg: "Released event · inside confirmTicket()" },
-  refund: { title: "Escrow refunds you", actor: "chain", msg: "FlightEscrow.cancel() → Refunded" },
+  release: { title: "Escrow pays the merchant", actor: "chain", msg: "Released · FlightEscrow.confirmTicket()" },
+  refund: { title: "Escrow refunds you", actor: "chain", msg: "Refunded · FlightEscrow.cancel()" },
 };
 
 const HAPPY_PATH: BookingStepKey[] = ["quote", "verify", "rules", "lock", "order", "ticket", "proof", "release"];

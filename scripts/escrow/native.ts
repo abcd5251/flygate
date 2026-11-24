@@ -15,9 +15,10 @@ import {
   signProofOfPossession,
   type UnifiedAccount,
 } from "@qorechain/sdk";
-import { retrying } from "../bootstrap/chain";
+import { DENOM, retrying } from "../bootstrap/chain";
 import type { NetworkSettings } from "../bootstrap/env";
 import { pqcKeyStatusOnEvm } from "../evm/chain";
+import { ALGORITHM_ML_DSA_87 } from "../evm/pqcKeyStatus";
 import type { EvmRole } from "../evm/keys";
 import { windowCovers, type WindowNeed } from "./plan";
 
@@ -71,6 +72,11 @@ interface TxLookup {
   tx_response?: { code: number; height: string; raw_log: string; gas_used: string };
 }
 
+/**
+ * One lookup of a broadcast tx by hash; undefined until it is in a block. Deliberately not
+ * wrapped in `retrying`, and the broadcast itself is never retried: sendNative polls this
+ * instead of resending, so a lost broadcast answer can never send a tx twice.
+ */
 async function findTx(network: NetworkSettings, hash: string): Promise<TxLookup["tx_response"] | undefined> {
   const res = await fetch(`${network.rest}/cosmos/tx/v1beta1/txs/${hash}`);
   if (!res.ok) return undefined;
@@ -98,7 +104,7 @@ async function sendNative(
       chainId: network.chainId,
       ...seq,
       messages,
-      fee: { amount: [{ denom: "uqor", amount: Math.ceil(gas * GAS_PRICE_UQOR).toString() }], gas: gas.toString() },
+      fee: { amount: [{ denom: DENOM, amount: Math.ceil(gas * GAS_PRICE_UQOR).toString() }], gas: gas.toString() },
       signBytesVersion,
     });
 
@@ -113,7 +119,6 @@ async function sendNative(
   const signed = sign(Math.ceil(sim * GAS_HEADROOM));
   const hash = createHash("sha256").update(signed.txRawBytes).digest("hex").toUpperCase();
 
-  // Not retried: the hash is looked up instead.
   const sent = await restPost<{ tx_response?: { code: number; raw_log: string }; message?: string }>(
     network,
     "/cosmos/tx/v1beta1/txs",
@@ -153,7 +158,7 @@ export async function ensureSignerPqc(
   const proofOfPossession = signProofOfPossession({
     chainId: network.chainId,
     account: unified.cosmos,
-    algorithmId: 1,
+    algorithmId: ALGORITHM_ML_DSA_87,
     keypair: unified.pqc,
   });
   const msg = buildRegisterPqcKeyMsg(unified.cosmos, { pqcKeypair: unified.pqc, keyType: "hybrid", proofOfPossession });
@@ -165,11 +170,12 @@ export async function ensureSignerPqc(
   return tx;
 }
 
+/**
+ * A run's window need. A newly opened window gets exactly `txs` as maxTxs, `value` as
+ * maxValue and `target` as its only allowed target; `blocks` is the minimum lifetime left
+ * for reusing an open one.
+ */
 export interface WindowSpec extends WindowNeed {
-  /** maxTxs of a newly opened window. */
-  maxTxs: number;
-  /** maxValue (uqor) of a newly opened window. */
-  maxValue: bigint;
   /** Lifetime in blocks of a newly opened window (~1.03 s each on diana). */
   openBlocks: number;
 }
@@ -186,8 +192,8 @@ export async function ensureWindow(
   const msg = openEvmWindowMsg({
     sender: unified.cosmos,
     blocks: spec.openBlocks,
-    maxTxs: spec.maxTxs,
-    maxValue: spec.maxValue.toString(),
+    maxTxs: spec.txs,
+    maxValue: spec.value.toString(),
     ...(spec.target ? { allowedTargets: [spec.target] } : {}),
   });
   const tx = await sendNative(network, unified, [msg], "hybrid", `${role.role} signer EVM window`);

@@ -9,6 +9,7 @@ import {
   type Abi,
   type Account,
   type Chain,
+  type Hex,
   type PublicClient,
   type TransactionReceipt,
   type Transport,
@@ -16,8 +17,7 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { NetworkSettings } from "../bootstrap/env";
-import { DIANA_EVM_CHAIN_ID } from "../evm/chain";
-import type { Hex } from "../evm/keys";
+import { DIANA_EVM_CHAIN_ID } from "../../src/lib/chain";
 import { afterBroadcastError } from "./plan";
 
 /**

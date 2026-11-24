@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { Hex } from "viem";
 import { decodePqcKeyStatus, encodePqcKeyStatusCall, PQC_KEY_STATUS_ADDRESS } from "./pqcKeyStatus";
 
 // Expected bytes come from Foundry's `cast calldata` / `cast abi-encode`.
@@ -13,19 +14,18 @@ test("calldata for pqcKeyStatus(address)", () => {
 });
 
 test("rejects an address that is not 20 bytes of hex", () => {
-  assert.throws(() => encodePqcKeyStatusCall("0x1234" as `0x${string}`), /20-byte/);
+  assert.throws(() => encodePqcKeyStatusCall("0x1234"), /Address "0x1234" is invalid/);
 });
 
 test("decodes (bool registered, uint8 algorithmId, bytes pubkey, bool possessionProven)", () => {
   // cast abi-encode "f(bool,uint8,bytes,bool)" true 1 0xdeadbeef true
-  const ret =
-    "0x" +
+  const ret = ("0x" +
     "0000000000000000000000000000000000000000000000000000000000000001" +
     "0000000000000000000000000000000000000000000000000000000000000001" +
     "0000000000000000000000000000000000000000000000000000000000000080" +
     "0000000000000000000000000000000000000000000000000000000000000001" +
     "0000000000000000000000000000000000000000000000000000000000000004" +
-    "deadbeef00000000000000000000000000000000000000000000000000000000";
+    "deadbeef00000000000000000000000000000000000000000000000000000000") as Hex;
   const status = decodePqcKeyStatus(ret);
   assert.equal(status.registered, true);
   assert.equal(status.algorithmId, 1);
@@ -35,7 +35,7 @@ test("decodes (bool registered, uint8 algorithmId, bytes pubkey, bool possession
 
 test("decodes an unregistered account (empty pubkey)", () => {
   // cast abi-encode "f(bool,uint8,bytes,bool)" false 0 0x false
-  const ret = "0x" + "0".repeat(64 * 2) + "0".repeat(62) + "80" + "0".repeat(64 * 2);
+  const ret: Hex = `0x${"0".repeat(64 * 2)}${"0".repeat(62)}80${"0".repeat(64 * 2)}`;
   assert.deepEqual(decodePqcKeyStatus(ret), {
     registered: false,
     algorithmId: 0,
@@ -45,5 +45,5 @@ test("decodes an unregistered account (empty pubkey)", () => {
 });
 
 test("rejects a truncated return value", () => {
-  assert.throws(() => decodePqcKeyStatus("0x" + "0".repeat(64 * 3)), /pqcKeyStatus/);
+  assert.throws(() => decodePqcKeyStatus(`0x${"0".repeat(64 * 3)}`), /pqcKeyStatus/);
 });

@@ -5,6 +5,7 @@ import { ArrowRight, CheckCircle2, Siren } from "lucide-react";
 import { AirlineBadge } from "@/components/FlightCard";
 import { EmptyState, FlowBand } from "@/components/FlowBand";
 import { Card, cx, HashText, SourceTag } from "@/components/ui";
+import { STEP_META } from "@/lib/booking";
 import { CABIN_LABEL, formatDateLong, usd } from "@/lib/mandate";
 import { DEMO_OFFERS, formatDuration } from "@/lib/offers";
 import { useDemo } from "@/lib/store";
@@ -34,7 +35,7 @@ export default function TicketPage() {
     { label: "Quote signature", note: "ML-DSA-87, checked by pqcVerify", value: booking.quoteSigPreview ?? "", real: true },
     { label: "Escrow payment", note: "FlightEscrow.book()", value: stepHash("lock"), real: false },
     { label: "Ticket proof", note: "ML-DSA-87, checked before payout", value: booking.proofSigPreview ?? "", real: true },
-        { label: "Payout", note: "Released · FlightEscrow.confirmTicket()", value: stepHash("release"), real: false },
+    { label: "Payout", note: STEP_META.release.msg!, value: stepHash("release"), real: false },
     { label: "Passport ciphertext", note: `ML-KEM-1024 · ${state.passenger?.kemCiphertextBytes.toLocaleString()} bytes`, value: `0x${state.passenger?.preview ?? ""}`, real: true },
   ];
 

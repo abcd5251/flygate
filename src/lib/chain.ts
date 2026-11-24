@@ -6,12 +6,19 @@ import type { ChainTx, TxKind } from "./types";
  * swap to real calls is one module.
  */
 
+/** diana's EVM chain id. FlightEscrow's constructor refuses any other chain. */
+export const DIANA_EVM_CHAIN_ID = 9800;
+/** 1 uqor (6 decimals, bank) = 1e12 wei (18 decimals, EVM). */
+export const WEI_PER_UQOR = BigInt(1_000_000_000_000);
+
 export const CHAIN = {
   name: "QoreChain diana",
   chainId: "qorechain-diana",
-  evmChainId: 9800,
+  evmChainId: DIANA_EVM_CHAIN_ID,
   explorer: "https://explore.qore.network",
 };
+
+export const explorerAddressUrl = (address: string) => `${CHAIN.explorer}/address/${address}`;
 
 export const ADDRESSES = {
   owner: "qor1u7x3k9p2m4d8f6h5j0l2n4q6s8t0v2w4y6z8k2f",

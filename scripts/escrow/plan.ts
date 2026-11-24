@@ -1,4 +1,5 @@
 // Pure decisions for the escrow deploy/e2e scripts. Nothing here touches the network.
+import { WEI_PER_UQOR } from "../../src/lib/chain";
 
 export interface TopUpRule {
   /** Skip the transfer when the balance is at least this. */
@@ -64,8 +65,6 @@ export function windowCovers(w: WindowView, need: WindowNeed): boolean {
   }
   return true;
 }
-
-const WEI_PER_UQOR = BigInt(1_000_000_000_000);
 
 /** What a window must allow for these txs: sum of value + gasCap x maxFeePerGas, wei -> uqor rounded up. */
 export function windowValueUqor(txs: readonly { value?: bigint; gasCap: bigint }[], maxFeePerGas: bigint): bigint {
