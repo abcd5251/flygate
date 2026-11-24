@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+/*
+  FlyGate theme. Layout and palette follow the familiar OTA pattern
+  (blue hero band, white search card, blue prices) so judges read it as
+  a real booking product; gate states (pass / block / post-quantum) get
+  their own semantic colors.
+*/
+@theme {
+  --color-brand: #3264ff;
+  --color-brand-600: #2450e6;
+  --color-brand-700: #1d41c2;
+  --color-brand-100: #dce6ff;
+  --color-brand-50: #eef3ff;
+
+  --color-ink: #0f294d;
+  --color-ink-2: #455873;
+  --color-muted: #8592a6;
+  --color-line: #e4e8ef;
+  --color-canvas: #f5f7fa;
+
+  --color-pass: #00a86b;
+  --color-pass-50: #e6f7f0;
+  --color-block: #e5484d;
+  --color-block-50: #fdecec;
+  --color-warn: #c26a00;
+  --color-warn-50: #fff4e0;
+  --color-pq: #6d4aff;
+  --color-pq-50: #f1edff;
+
+  --color-night: #0b1220;
+  --color-night-2: #111a2e;
+  --color-night-line: #22304a;
+
+  --font-sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-jbmono), ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --shadow-card: 0 8px 28px rgba(15, 41, 77, 0.08);
+  --shadow-float: 0 12px 32px rgba(15, 41, 77, 0.18);
+
+  --animate-fade-up: fade-up 0.45s ease-out both;
+  --animate-pop: pop 0.35s ease-out both;
+  --animate-blink: blink 1s step-end infinite;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pop {
+  0% { opacity: 0; transform: scale(0.85); }
+  70% { opacity: 1; transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+html {
+  color-scheme: light;
+  scroll-padding-top: 120px;
+}
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-band {
+  background:
+    radial-gradient(1200px 400px at 85% 120%, rgba(255, 255, 255, 0.18), transparent 60%),
+    linear-gradient(135deg, #2452e8 0%, #3264ff 45%, #4f8cff 100%);
+}
+
+.pass-notch {
+  position: relative;
+}
+.pass-notch::before,
+.pass-notch::after {
+  content: "";
+  position: absolute;
+  left: -11px;
+  width: 22px;
+  height: 22px;
+  border-radius: 9999px;
+  background: var(--color-canvas);
+}
+.pass-notch::before { top: -11px; }
+.pass-notch::after { bottom: -11px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
