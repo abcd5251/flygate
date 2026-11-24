@@ -130,6 +130,8 @@ QoreChain 規定 agent 必須真的在鏈上動作，所以要按這個順序把
 
 1. **鏈上部分**（`src/lib/chain.ts`）：建立 owner、agent、商家三個 diana 帳號；用 `ensurePqcRegistered` 註冊 ML-DSA-87；`linkAuthenticatorMsgs` 綁定 agent 私鑰與支出規則；`openEvmWindowMsg` 開限範圍 window。
 2. ~~**FlightEscrow 合約**：`book()` 呼叫 `pqcVerify` 驗商家報價並鎖款；`confirmTicket()` 驗開票證明後放款；`refund()` 逾時或失敗時退款。用 Foundry 寫測試。~~ **完成**：已部署到 diana [`0x7e9eCaBf07fAde561d4022A53ca7865c7531D97C`](https://explore.qore.network/address/0x7e9eCaBf07fAde561d4022A53ca7865c7531D97C)（[部署交易](https://explore.qore.network/tx/0x1c246db3ab6b4c90c7fd0b12e3dc0707a241d4d00d9b1cf3b9dbfc7902bd3a9f)，區塊 10662861），三種結果都在測試網跑過。紀錄在 `deployments/diana.json`；重跑用 `pnpm escrow:deploy`、`pnpm escrow:e2e`。
+
+   合約測試：先 `pnpm install`，再直接 `forge test`。預設就開 ffi，`contracts/test/ffi` 會呼叫 `node_modules/.bin/tsx scripts/escrow-ffi.ts`，用真的 ML-DSA-87 交叉驗證 `src/lib/escrow.ts` 和合約簽的是同一組位元組；沒先裝套件，這幾個測試會失敗。
 3. **Duffel**：新增 `src/app/api/offers/route.ts` 與 `src/app/api/orders/route.ts`，金鑰只放在伺服器環境變數 `DUFFEL_TEST_TOKEN`。
 4. **攻擊演習**：把 `runOne()` 改成真的用 agent 私鑰送交易，錯誤碼直接顯示鏈上回傳的結果。
 5. **Claude**：把 `parseIntent()` 換成 Claude，排序理由也由 Claude 產生；閘門與合約不變。
