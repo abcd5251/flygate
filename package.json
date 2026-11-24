@@ -8,6 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "bootstrap": "tsx scripts/bootstrap/index.ts",
+    "evm:check": "tsx scripts/evm/check.ts",
+    "test:scripts": "tsx --test 'scripts/**/*.test.ts'",
     "test:contracts": "forge test",
     "test:contracts:ffi": "FOUNDRY_PROFILE=ffi forge test"
   },
