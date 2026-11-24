@@ -34,7 +34,7 @@ export default function TicketPage() {
     { label: "Quote signature", note: "ML-DSA-87, checked by pqcVerify", value: booking.quoteSigPreview ?? "", real: true },
     { label: "Escrow payment", note: "FlightEscrow.book()", value: stepHash("lock"), real: false },
     { label: "Ticket proof", note: "ML-DSA-87, checked before payout", value: booking.proofSigPreview ?? "", real: true },
-        { label: "Payout", note: "FlightEscrow.release()", value: stepHash("release"), real: false },
+        { label: "Payout", note: "Released · FlightEscrow.confirmTicket()", value: stepHash("release"), real: false },
     { label: "Passport ciphertext", note: `ML-KEM-1024 · ${state.passenger?.kemCiphertextBytes.toLocaleString()} bytes`, value: `0x${state.passenger?.preview ?? ""}`, real: true },
   ];
 

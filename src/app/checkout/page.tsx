@@ -105,7 +105,7 @@ export default function CheckoutPage() {
             await wait(1200);
             if (cancelled) return "stop";
             const amount = b.quotedPriceUsd ?? b.priceUsd;
-            const tx = makeTx(`Refund ${usd(amount)}`, "FlightEscrow.refund()", "contract");
+            const tx = makeTx(`Refund ${usd(amount)}`, "Refunded · FlightEscrow.cancel()", "contract");
             addTx(tx);
             update((st) => ({
               ...st,
@@ -145,7 +145,7 @@ export default function CheckoutPage() {
           return ok ? "next" : "stop";
         }
         case "release": {
-          const tx = makeTx("Payout to merchant", "FlightEscrow.release()", "contract");
+          const tx = makeTx("Payout to merchant", "Released · FlightEscrow.confirmTicket()", "contract");
           addTx(tx);
           update((st) => ({
             ...st,

@@ -8,8 +8,8 @@ export const STEP_META: Record<BookingStepKey, { title: string; actor: "merchant
   order: { title: "Merchant books with Duffel", actor: "merchant", msg: "POST /air/orders" },
   ticket: { title: "Airline issues the ticket", actor: "merchant" },
   proof: { title: "Contract verifies the ticket proof", actor: "chain", msg: "FlightEscrow.confirmTicket()" },
-  release: { title: "Escrow pays the merchant", actor: "chain", msg: "FlightEscrow.release()" },
-  refund: { title: "Escrow refunds you", actor: "chain", msg: "FlightEscrow.refund()" },
+  release: { title: "Escrow pays the merchant", actor: "chain", msg: "Released event · inside confirmTicket()" },
+  refund: { title: "Escrow refunds you", actor: "chain", msg: "FlightEscrow.cancel() → Refunded" },
 };
 
 const HAPPY_PATH: BookingStepKey[] = ["quote", "verify", "rules", "lock", "order", "ticket", "proof", "release"];

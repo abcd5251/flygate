@@ -17,7 +17,8 @@ export const ADDRESSES = {
   owner: "qor1u7x3k9p2m4d8f6h5j0l2n4q6s8t0v2w4y6z8k2f",
   agent: "qor1agt9w2e4r6t8y0u2i4o6p8a0s2d4f6g8h0j7k2",
   merchant: "qor1mrc5z7x9c1v3b5n7m9q1w3e5r7t9y1u3i5o3p8",
-  escrow: "0x7a3fd91c02b5e64a18c9f0d27e3b5a6c4d8ec41e",
+  /** FlightEscrow on diana (deployments/diana.json). */
+  escrow: "0x7e9eCaBf07fAde561d4022A53ca7865c7531D97C",
   attacker: "0xbad0c0ffee000000000000000000000000dead00",
   pqcVerify: "0x0000000000000000000000000000000000000a01",
 };
