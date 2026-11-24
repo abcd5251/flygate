@@ -20,20 +20,43 @@ export async function handleLiveStatus(env: Env, getService: () => LiveService):
   return Response.json(await getService().status(), { headers: NO_STORE });
 }
 
-/**
- * POST /api/live/mandate with `{ step, mandate, mandateHash }`. Only those structured fields are
- * read; the server builds every message and calldata itself (D-08). 400 for malformed input.
- */
-export async function handleLiveMandate(env: Env, getService: () => LiveService, request: Request): Promise<Response> {
-  if (!liveEnabled(env)) return notFound();
+async function readBody(request: Request): Promise<Record<string, unknown> | Response> {
   let body: unknown;
   try {
     body = await request.json();
   } catch {
     return Response.json({ error: "Body must be JSON" }, { status: 400, headers: NO_STORE });
   }
-  if (typeof body !== "object" || body === null) return Response.json({ error: "Body must be an object" }, { status: 400, headers: NO_STORE });
-  const { step, mandate, mandateHash } = body as Record<string, unknown>;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return Response.json({ error: "Body must be an object" }, { status: 400, headers: NO_STORE });
+  return body as Record<string, unknown>;
+}
+
+/**
+ * POST /api/live/checkout with `{ step, offerId?, scenario?, mandate?, bookingId?, pnr? }`: one
+ * /checkout step. Only those structured fields are read (D-08). 400 for malformed input.
+ */
+export async function handleLiveCheckout(env: Env, getService: () => LiveService, request: Request): Promise<Response> {
+  if (!liveEnabled(env)) return notFound();
+  const body = await readBody(request);
+  if (body instanceof Response) return body;
+  const { step, offerId, scenario, mandate, bookingId, pnr } = body;
+  try {
+    return Response.json(await getService().checkout({ step, offerId, scenario, mandate, bookingId, pnr }), { headers: NO_STORE });
+  } catch (err) {
+    if (err instanceof BadRequest) return Response.json({ error: err.message }, { status: 400, headers: NO_STORE });
+    throw err;
+  }
+}
+
+/**
+ * POST /api/live/mandate with `{ step, mandate, mandateHash }`. Only those structured fields are
+ * read; the server builds every message and calldata itself (D-08). 400 for malformed input.
+ */
+export async function handleLiveMandate(env: Env, getService: () => LiveService, request: Request): Promise<Response> {
+  if (!liveEnabled(env)) return notFound();
+  const body = await readBody(request);
+  if (body instanceof Response) return body;
+  const { step, mandate, mandateHash } = body;
   try {
     return Response.json(await getService().setupMandate({ step, mandate, mandateHash }), { headers: NO_STORE });
   } catch (err) {

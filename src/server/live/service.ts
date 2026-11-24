@@ -22,18 +22,17 @@ import {
   type LiveMandateStep,
 } from "./mandate";
 import { formatQor, MAX_FEE_UQOR, usdToUqor } from "./money";
+import { bookSender, createCheckout, type CheckoutInput, type CheckoutResponse } from "./checkout";
+import { txFactory, type Clock, type StepResult } from "./tx";
 
 export { BadRequest };
+export type { Clock };
 
 export const DIANA_EVM_CHAIN_ID = 9800;
 /** How long one status result is reused (D-27). */
 export const STATUS_TTL_MS = 30_000;
 /** Owner-paid Cosmos txs per demo round (link, window); their fees come on top of the fare. */
 const OWNER_FEE_TXS = BigInt(2);
-
-export interface Clock {
-  now(): number;
-}
 
 export type LiveStatus = ChainStatus & { checkedAt: number };
 
@@ -46,8 +45,8 @@ export interface SetupMandateInput {
 
 /**
  * The server-side Live service. Its operations mirror `ChainPort`; Route Handlers are thin
- * adapters over it. lockFunds, confirmTicket, cancelBooking, checkFareCap and the booking-state
- * query arrive with #21-#24.
+ * adapters over it. /checkout runs one step per call (`checkout`); cancelBooking, checkFareCap and
+ * the booking-state query arrive with #22-#24 as more checkout steps.
  */
 export interface LiveService {
   status(): Promise<LiveStatus>;
@@ -57,6 +56,11 @@ export interface LiveService {
    * also after a failed broadcast. Throws BadRequest for malformed input.
    */
   setupMandate(input: SetupMandateInput): Promise<ChainTx>;
+  /**
+   * One step of a Live /checkout (quote, verify, lock, proof). Broadcasting steps are idempotent
+   * per (step, bookingId). Throws BadRequest for malformed input.
+   */
+  checkout(input: CheckoutInput): Promise<CheckoutResponse>;
 }
 
 export interface LiveServiceDeps {
@@ -148,23 +152,16 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
   /** Idempotency table: mandate hash -> the mandate it was first used with and each step's result. */
   const sessions = new Map<Hex, { canonical: string; steps: Map<LiveMandateStep, Promise<StepResult>> }>();
 
-  let txSeq = 0;
-  function liveTx(fields: Pick<ChainTx, "label" | "msg">, r: TxFields): ChainTx {
-    txSeq += 1;
-    return { id: `live_${clock.now()}_${txSeq}`, kind: "owner", source: "live", at: clock.now(), ...fields, ...r };
-  }
+  const txs = txFactory(clock, explorer);
 
   /** A failure found before anything was sent: not cached, so a later call may try again. */
   function refused(step: LiveMandateStep, code: string, reason: string): StepResult {
-    return { broadcast: false, tx: liveTx(STEP_TEXT[step], { ok: false, hash: "", code, reason }) };
+    return txs.refused("owner", STEP_TEXT[step], code, reason);
   }
 
+  // Failed txs never get an explorer link or the "Live tx" label, only the chain's error code (D-20).
   function fromOutcome(fields: Pick<ChainTx, "label" | "msg">, o: BroadcastOutcome): StepResult {
-    if (o.status === "success") {
-      return { broadcast: true, tx: liveTx(fields, { ok: true, hash: o.hash, lane: o.lane, explorerUrl: `${explorer}/tx/${o.hash}` }) };
-    }
-    // Failed txs never get an explorer link or the "Live tx" label, only the chain's error code (D-20).
-    return { broadcast: true, tx: liveTx(fields, { ok: false, hash: o.hash ?? "", lane: o.lane, code: o.code, reason: `${o.status}: ${o.reason}` }) };
+    return txs.fromOutcome("owner", fields, o);
   }
 
   async function runStep(step: LiveMandateStep, m: ReturnType<typeof parseMandate>, mandateHash: Hex, prev?: Promise<StepResult>): Promise<StepResult> {
@@ -187,7 +184,7 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
         return refused(step, "ticket count unknown", "FLIGHT_ESCROW_DEPLOY_BLOCK is not set, so the tickets already used cannot be counted; nothing was sent");
       }
       try {
-        used = await countUsedTickets(chain, escrow, config.deployBlock, owner.evm);
+        used = await countUsedTickets(chain, escrow, config.deployBlock, bookSender(config.lane, k));
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
         return refused(step, "ticket count unknown", `Could not read Booked/Refunded logs (${why}), so the tickets already used are unknown; nothing was sent`);
@@ -214,8 +211,9 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
         return fromOutcome(STEP_TEXT.window, await chain.sendCosmos("owner", [windowMsg({ owner: owner.cosmos, escrow, maxTickets: m.maxTickets, limits })], opts));
       case "mandate": {
         const mandate = onchainMandate(m, { merchant: k.roles.merchant.account.evm, used: used!, uqorPerUsd: config.uqorPerUsd, mandateHash });
-        // agent = the owner account's 0x address: book()'s msg.sender on the authenticator lane (ADR-0002).
-        const data = setMandateData(owner.evm, mandate);
+        // agent = book()'s msg.sender: the owner account's 0x address on the authenticator lane
+        // (ADR-0002), the agent's EOA on the eoa lane (D-11).
+        const data = setMandateData(bookSender(config.lane, k), mandate);
         return fromOutcome(STEP_TEXT.mandate, await chain.sendEvm("owner", { to: escrow, data, errorAbi: FLIGHT_ESCROW_ABI }, opts));
       }
     }
@@ -260,12 +258,22 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
     return result.tx;
   }
 
-  return { status, setupMandate };
-}
+  // ---------------------------------------------------------------- /checkout (#21)
 
-type TxFields = Pick<ChainTx, "ok" | "hash"> & Partial<Pick<ChainTx, "code" | "reason" | "lane" | "explorerUrl">>;
-/** A step's tx, and whether anything was broadcast for it (only those are kept for idempotency). */
-type StepResult = { broadcast: boolean; tx: ChainTx };
+  const checkoutSteps = createCheckout({
+    chain,
+    config,
+    clock,
+    keys: liveKeys,
+    async liveEscrow() {
+      const st = await status();
+      if (!st.available || !st.escrow) return { code: "live unavailable", reason: st.reason ?? "Live is unavailable" };
+      return { escrow: st.escrow as Hex };
+    },
+  });
+
+  return { status, setupMandate, checkout: checkoutSteps.checkout };
+}
 
 const STEP_TEXT: Record<LiveMandateStep, Pick<ChainTx, "label" | "msg">> = {
   link: { label: "Link agent key + spending rule", msg: "MsgUpdateSpendingRules + MsgRegisterAuthenticator" },

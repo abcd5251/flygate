@@ -61,6 +61,25 @@ export interface LogFilter {
   topics: (Hex | null)[];
 }
 
+/** A read-only EVM call (eth_call at latest). Nothing is signed or sent. */
+export interface EthCallRequest {
+  to: Hex;
+  data: Hex;
+  /** msg.sender of the simulated call. */
+  from?: Hex;
+  /** wei. */
+  value?: bigint;
+}
+
+/**
+ * What an eth_call returned. A revert is an answer, not an error: `data` is the revert data
+ * (decode it with the contract's error ABI). RPC failures throw instead.
+ */
+export type EthCallResult = { status: "success"; data: Hex } | { status: "reverted"; data: Hex; reason: string };
+
+/** Which MsgExecuteEVM digest diana verifies (`resolveEvmAuthDigestVersion`). */
+export type EvmAuthDigestVersion = "v1" | "v2";
+
 /** A key linked to an account (abstractaccount authenticators). */
 export interface LinkedKey {
   /** Lowercase hex without 0x (a 20-byte ETH address for scheme secp256k1 links). */
@@ -90,6 +109,15 @@ export interface ServerChain {
   getLogs(filter: LogFilter): Promise<EvmLog[]>;
   /** Keys linked to a qor1 account, revoked ones included. */
   linkedKeys(cosmos: string): Promise<LinkedKey[]>;
+  /** eth_call at latest. Resolves with the revert data when the call reverts; throws on RPC errors. */
+  ethCall(req: EthCallRequest): Promise<EthCallResult>;
+  /**
+   * The sequence the next MsgExecuteEVM from linked key `pubkey` (a 0x ETH address) acting for
+   * `account` (qor1) must carry (`fetchAuthNonce`). Not the account's EVM nonce.
+   */
+  authNonce(account: string, pubkey: Hex): Promise<bigint>;
+  /** The MsgExecuteEVM digest diana verifies now (`resolveEvmAuthDigestVersion`); never guessed. */
+  evmAuthDigestVersion(): Promise<EvmAuthDigestVersion>;
   /**
    * One Cosmos tx from `from`'s bootstrap account (coin 118, qor1), hybrid-signed with its
    * registered ML-DSA-87 key; waits for inclusion. Lane "cosmos", Cosmos hash.

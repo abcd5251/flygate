@@ -1,5 +1,7 @@
 import { usd } from "./mandate";
-import type { ChainTx, DemoMode, LiveAddresses, Mandate, TxKind, TxSource } from "./types";
+import { DEMO_OFFERS, PRICE_CHANGE_USD } from "./offers";
+import { pqcVerifyMerchant, preview, signAsMerchant } from "./pq";
+import type { ChainTx, DemoMode, LiveAddresses, Mandate, Scenario, TxKind, TxSource } from "./types";
 
 /**
  * Browser-safe QoreChain (diana testnet) layer: constants, `shortAddr`, the simulation helpers
@@ -72,7 +74,30 @@ export const MANDATE_TX_STEPS: Record<DemoMode, MandateTxStep[]> = {
 };
 
 export type MandateChainInput = { step: MandateTxStep; mandate: Mandate; mandateHash?: string };
-export type BookingChainInput = { offerId: string; amountUsd: number };
+/** `bookingId` is the on-chain id fixed by the Live quote (absent in Simulated mode). */
+export type BookingChainInput = { offerId: string; amountUsd: number; bookingId?: string };
+export type QuoteInput = { offerId: string; scenario: Scenario; mandate: Mandate; mandateHash?: string };
+/** `pnr` is hashed into the TicketProof the merchant signs. */
+export type TicketInput = BookingChainInput & { pnr: string };
+
+/**
+ * The merchant's signed quote. Live: signed on the server with the merchant's registered
+ * ML-DSA-87 key over the on-chain Quote; `bookingId` = keccak256(abi.encode(quote)) and
+ * `priceQor` is the price at LIVE_QOR_PER_USD (D-14). `quoteId` names it for `verifyQuote`.
+ */
+export type CheckoutQuote =
+  | { ok: true; quoteId: string; bookingId?: string; priceUsd: number; priceQor?: string; sigBytes: number; sigPreview: string; source: TxSource }
+  | { ok: false; code: string; reason: string };
+
+/** The quote signature check: in the browser (Simulated) or pqcVerify via eth_call (Live read). */
+export type QuoteCheck = { ok: boolean; detail: string; source: TxSource; readResult?: string; code?: string };
+
+/**
+ * The ticket proof step. `release` is the payout the `Released` event of the same confirmTicket()
+ * reports (same hash in Live). `sigBytes` / `sigPreview` are the merchant's TicketProof signature;
+ * `verified` whether it checked out (Live: confirmTicket() succeeded).
+ */
+export type TicketProofResult = { proof: ChainTx; release: ChainTx; sigBytes?: number; sigPreview?: string; verified: boolean };
 export type FareCapInput = { offerId: string; priceUsd: number; maxFareUsd: number };
 
 /** Result of the backup on-chain fare-cap check, run after the off-chain gate rejected a quote. */
@@ -102,9 +127,13 @@ export type ChainStatus = {
  */
 export interface ChainPort {
   setupMandate(input: MandateChainInput): Promise<ChainTx>;
+  /** The merchant signs the final quote. */
+  signQuote(input: QuoteInput): Promise<CheckoutQuote>;
+  /** pqcVerify on the signature of quote `quoteId` (Simulated re-signs from `input` after a reload). */
+  verifyQuote(input: QuoteInput & { quoteId?: string }): Promise<QuoteCheck>;
   lockFunds(input: BookingChainInput): Promise<ChainTx>;
-  /** `release` is the payout the `Released` event of the same confirmTicket() reports. */
-  confirmTicket(input: BookingChainInput): Promise<{ proof: ChainTx; release: ChainTx }>;
+  /** The merchant signs the TicketProof and confirmTicket() pays out (`release`, same tx). */
+  confirmTicket(input: TicketInput): Promise<TicketProofResult>;
   cancelBooking(input: BookingChainInput): Promise<ChainTx>;
   checkFareCap(input: FareCapInput): Promise<FareCapCheck>;
   status(): Promise<ChainStatus>;
@@ -117,18 +146,59 @@ const SIMULATED_MANDATE_TXS: Record<MandateTxStep, readonly [label: string, msg:
   mandate: ["Write mandate on-chain", "FlightEscrow.setMandate()"],
 };
 
+/** Simulated quotes by id, so verify checks the payload that was signed. */
+const simulatedQuotes = new Map<string, { payload: unknown; sig: Uint8Array }>();
+let quoteSeq = 0;
+
+async function simulatedQuote(input: QuoteInput) {
+  const offer = DEMO_OFFERS.find((o) => o.id === input.offerId);
+  if (!offer) throw new Error(`Unknown offer ${input.offerId}`);
+  const price = input.scenario === "price_change" ? PRICE_CHANGE_USD : offer.priceUsd;
+  const payload = {
+    offerId: offer.id,
+    flight: offer.flightNo,
+    route: `${offer.from}-${offer.to}`,
+    date: offer.date,
+    priceUsd: price,
+    escrow: ADDRESSES.escrow,
+    mandateHash: input.mandateHash,
+    validUntil: Date.now() + 20 * 60_000,
+  };
+  const r = await signAsMerchant(payload);
+  quoteSeq += 1;
+  const quoteId = `sim_quote_${Date.now()}_${quoteSeq}`;
+  simulatedQuotes.set(quoteId, { payload, sig: r.sig });
+  return { quoteId, price, r };
+}
+
 export const simulatedChain: ChainPort = {
   async setupMandate({ step }) {
     const [label, msg] = SIMULATED_MANDATE_TXS[step];
     return makeTx(label, msg, "owner");
   },
+  async signQuote(input) {
+    const { quoteId, price, r } = await simulatedQuote(input);
+    return { ok: true, quoteId, priceUsd: price, sigBytes: r.sigBytes, sigPreview: preview(r.sig), source: "simulated" };
+  },
+  async verifyQuote({ quoteId, ...input }) {
+    // After a reload the in-memory quote is gone: sign a fresh one, as before.
+    const { payload, sig } = (quoteId && simulatedQuotes.get(quoteId)) || simulatedQuotes.get((await simulatedQuote(input)).quoteId)!;
+    const ok = await pqcVerifyMerchant(payload, sig);
+    return { ok, detail: `pqcVerify(merchant key, quote, signature) → ${ok}`, source: "simulated" };
+  },
   async lockFunds({ amountUsd }) {
     return makeTx(`Escrow ${usd(amountUsd)}`, "MsgExecuteEVM", "agent");
   },
-  async confirmTicket() {
+  async confirmTicket({ offerId, pnr }) {
+    const payload = { pnr, offerId, escrow: ADDRESSES.escrow, issuedAt: Date.now() };
+    const r = await signAsMerchant(payload);
+    const verified = await pqcVerifyMerchant(payload, r.sig);
     return {
       proof: makeTx("Ticket proof on-chain", "FlightEscrow.confirmTicket()", "merchant"),
       release: makeTx("Payout to merchant", "Released event · confirmTicket()", "contract"),
+      sigBytes: r.sigBytes,
+      sigPreview: preview(r.sig),
+      verified,
     };
   },
   async cancelBooking({ amountUsd }) {
@@ -158,34 +228,53 @@ function unavailable(reason: string): ChainStatus {
 }
 
 /**
+ * POST one structured request to a Live route. When the server cannot answer (unreachable, 404
+ * because LIVE_MODE is off, 400), `failed(reason, code)` builds the step's failure instead.
+ */
+async function postLive<T>(path: string, body: unknown, failed: (reason: string, code: string) => T): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+  } catch {
+    return failed("Live server unreachable", "rpc error");
+  }
+  if (res.status === 404) return failed("LIVE_MODE is not on", "live unavailable");
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    return failed(err.error ?? `HTTP ${res.status}`, `http ${res.status}`);
+  }
+  return (await res.json()) as T;
+}
+
+/**
  * Live mode: every on-chain step is a fetch to /api/live/*, where the server signs and sends to
- * diana (ADR-0001). The browser never sees keys or the SDK, only public results.
+ * diana (ADR-0001). The browser never sees keys or the SDK, only public results. /checkout
+ * steps send only ids (offerId, scenario, bookingId, pnr) and the mandate (D-08).
  */
 export const liveChain: ChainPort = {
   async setupMandate({ step, mandate, mandateHash }) {
-    let res: Response;
-    try {
-      res = await fetch("/api/live/mandate", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ step, mandate, mandateHash }),
-        cache: "no-store",
-      });
-    } catch {
-      return liveFailure("Live server unreachable", "rpc error");
-    }
-    if (res.status === 404) return liveFailure("LIVE_MODE is not on", "live unavailable");
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      return liveFailure(body.error ?? `HTTP ${res.status}`, `http ${res.status}`);
-    }
-    return (await res.json()) as ChainTx;
+    return postLive("/api/live/mandate", { step, mandate, mandateHash }, liveFailure);
   },
-  async lockFunds() {
-    return notYetLive("lockFunds");
+  async signQuote({ offerId, scenario, mandate }) {
+    return postLive<CheckoutQuote>("/api/live/checkout", { step: "quote", offerId, scenario, mandate }, (reason, code) => ({ ok: false, code, reason }));
   },
-  async confirmTicket() {
-    return notYetLive("confirmTicket");
+  async verifyQuote({ quoteId }) {
+    return postLive<QuoteCheck>("/api/live/checkout", { step: "verify", bookingId: quoteId }, (reason, code) => ({ ok: false, detail: reason, code, source: "live" }));
+  },
+  async lockFunds({ bookingId }) {
+    return postLive("/api/live/checkout", { step: "lock", bookingId }, liveFailure);
+  },
+  async confirmTicket({ bookingId, pnr }) {
+    return postLive<TicketProofResult>("/api/live/checkout", { step: "proof", bookingId, pnr }, (reason, code) => ({
+      proof: liveFailure(reason, code),
+      release: liveFailure(reason, code),
+      verified: false,
+    }));
   },
   async cancelBooking() {
     return notYetLive("cancelBooking");

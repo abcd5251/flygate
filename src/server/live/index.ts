@@ -3,7 +3,7 @@ import { readLiveConfig } from "./config";
 import { createDianaChain } from "./diana";
 import { createLiveService, type LiveService } from "./service";
 
-export { handleLiveMandate, handleLiveStatus } from "./http";
+export { handleLiveCheckout, handleLiveMandate, handleLiveStatus } from "./http";
 
 const globalForLive = globalThis as typeof globalThis & { __flygateLive?: LiveService };
 

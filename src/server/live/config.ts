@@ -9,6 +9,13 @@ import "server-only";
 export const LIVE_ROLES = ["owner", "agent", "merchant"] as const;
 export type LiveRole = (typeof LIVE_ROLES)[number];
 
+/**
+ * Who sends FlightEscrow.book() (D-09, D-11): the Linked agent key through MsgExecuteEVM from the
+ * owner account ("authenticator"), or the agent's coin-60 EOA directly ("eoa", the fallback).
+ */
+export const BOOK_LANES = ["authenticator", "eoa"] as const;
+export type BookLane = (typeof BOOK_LANES)[number];
+
 export const MNEMONIC_VARS: Record<LiveRole, string> = {
   owner: "OWNER_MNEMONIC",
   agent: "AGENT_MNEMONIC",
@@ -44,6 +51,8 @@ export interface LiveConfig {
   deployBlock?: bigint;
   /** uqor per US$ (LIVE_QOR_PER_USD in QOR, 6 decimals). */
   uqorPerUsd: bigint;
+  /** LIVE_BOOK_LANE; defaults to "authenticator". */
+  lane: BookLane;
   network: LiveNetwork;
   /** Settings that are set but unusable (the status check reports the first one). */
   problems: string[];
@@ -81,12 +90,19 @@ export function readLiveConfig(env: Env): LiveConfig {
       problems.push("LIVE_QOR_PER_USD is not a QOR amount (e.g. 0.01)");
     }
   }
+  let lane: BookLane = "authenticator";
+  const laneRaw = get("LIVE_BOOK_LANE");
+  if (laneRaw) {
+    if ((BOOK_LANES as readonly string[]).includes(laneRaw)) lane = laneRaw as BookLane;
+    else problems.push(`LIVE_BOOK_LANE must be ${BOOK_LANES.join(" or ")}`);
+  }
   return {
     liveMode: get("LIVE_MODE") === "on",
     mnemonics,
     escrowAddress: get("FLIGHT_ESCROW_ADDRESS"),
     deployBlock: block && /^\d+$/.test(block) ? BigInt(block) : undefined,
     uqorPerUsd,
+    lane,
     problems,
     network: {
       chainId: get("QORE_CHAIN_ID") ?? LIVE_DEFAULTS.chainId,

@@ -212,6 +212,35 @@ export function encodeSetMandate(agent: Address, m: OnchainMandate): Hex {
   });
 }
 
+/** Calldata of `book(quote, signature)`; the call carries `quote.priceWei` as its value. */
+export function encodeBook(q: Quote, signature: Hex): Hex {
+  return encodeFunctionData({
+    abi: FLIGHT_ESCROW_ABI,
+    functionName: "book",
+    args: [{ ...q, origin: cityCode(q.origin), destination: cityCode(q.destination) }, signature],
+  });
+}
+
+/** Calldata of `confirmTicket(proof, signature)`. */
+export function encodeConfirmTicket(t: TicketProof, signature: Hex): Hex {
+  return encodeFunctionData({ abi: FLIGHT_ESCROW_ABI, functionName: "confirmTicket", args: [t, signature] });
+}
+
+/** Calldata of `cancel(proof, signature)`. */
+export function encodeCancel(c: CancelProof, signature: Hex): Hex {
+  return encodeFunctionData({ abi: FLIGHT_ESCROW_ABI, functionName: "cancel", args: [c, signature] });
+}
+
+/** The ML-DSA verify precompile FlightEscrow calls (QoreChain `pqcVerify`, 0x…0a01). */
+export const PQC_VERIFY_ADDRESS = "0x0000000000000000000000000000000000000a01" as const;
+export const PQC_VERIFY_ABI = parseAbi(["function pqcVerify(bytes pubkey, bytes signature, bytes message) view returns (bool)"]);
+
+/** Calldata of `pqcVerify(pubkey, signature, message)`, for an eth_call. */
+export function encodePqcVerify(publicKey: Uint8Array | Hex, signature: Hex, message: Uint8Array): Hex {
+  const pk = typeof publicKey === "string" ? publicKey : bytesToHex(publicKey);
+  return encodeFunctionData({ abi: PQC_VERIFY_ABI, functionName: "pqcVerify", args: [pk, signature, bytesToHex(message)] });
+}
+
 /** abi.encode(proof), as Solidity encodes a FlightEscrow.TicketProof. */
 export function encodeTicketProof(t: TicketProof): Hex {
   return encodeAbiParameters(ticketAbi, [t]);

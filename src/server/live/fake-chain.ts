@@ -1,5 +1,21 @@
 import "server-only";
-import type { BroadcastOptions, BroadcastOutcome, CosmosMsg, EvmLog, EvmTxRequest, Hex, LinkedKey, LogFilter, PqcKeyStatus, ServerChain } from "./chain";
+import { decodeFunctionData, encodeFunctionResult, hexToBytes } from "viem";
+import { PQC_VERIFY_ABI, PQC_VERIFY_ADDRESS, verifyMessage } from "@/lib/escrow";
+import type {
+  BroadcastOptions,
+  BroadcastOutcome,
+  CosmosMsg,
+  EthCallRequest,
+  EthCallResult,
+  EvmAuthDigestVersion,
+  EvmLog,
+  EvmTxRequest,
+  Hex,
+  LinkedKey,
+  LogFilter,
+  PqcKeyStatus,
+  ServerChain,
+} from "./chain";
 import type { LiveRole } from "./config";
 
 export type FakeCall = { method: keyof ServerChain; args: unknown[] };
@@ -22,6 +38,14 @@ export interface FakeChainState {
   logs: EvmLog[];
   /** Linked keys per qor1 account. */
   linked: Record<string, LinkedKey[]>;
+  /** Authenticator sequence per `${qor1}/${lowercase 0x pubkey}`; missing means 0. */
+  authNonces: Record<string, bigint>;
+  digestVersion: EvmAuthDigestVersion;
+  /**
+   * Answers eth_call. The default runs pqcVerify for real (ML-DSA-87 over the call's arguments)
+   * and returns "0x" for anything else.
+   */
+  ethCall?: (req: EthCallRequest) => EthCallResult;
   /** Make a method throw this error (an RPC failure). For sends, prefer `outcomes`. */
   fail: Partial<Record<keyof ServerChain, Error>>;
   /** How each broadcast ends, in order; once empty, broadcasts succeed. */
@@ -49,7 +73,7 @@ export class FakeChain implements ServerChain {
   private sent = 0;
 
   constructor(state: Partial<FakeChainState> = {}) {
-    this.state = { chainId: 9800, code: {}, pqc: {}, bank: {}, evm: {}, logs: [], linked: {}, fail: {}, outcomes: [], ...state };
+    this.state = { chainId: 9800, code: {}, pqc: {}, bank: {}, evm: {}, logs: [], linked: {}, authNonces: {}, digestVersion: "v2", fail: {}, outcomes: [], ...state };
   }
 
   private record(method: keyof ServerChain, args: unknown[]) {
@@ -100,6 +124,18 @@ export class FakeChain implements ServerChain {
     this.record("linkedKeys", [cosmos]);
     return this.state.linked[cosmos] ?? [];
   }
+  async ethCall(req: EthCallRequest) {
+    this.record("ethCall", [req]);
+    return this.state.ethCall ? this.state.ethCall(req) : defaultEthCall(req);
+  }
+  async authNonce(account: string, pubkey: Hex) {
+    this.record("authNonce", [account, pubkey]);
+    return this.state.authNonces[`${account}/${pubkey.toLowerCase()}`] ?? BigInt(0);
+  }
+  async evmAuthDigestVersion() {
+    this.record("evmAuthDigestVersion", []);
+    return this.state.digestVersion;
+  }
   async sendCosmos(from: LiveRole, messages: CosmosMsg[], opts: BroadcastOptions) {
     this.record("sendCosmos", [from, messages, opts]);
     return this.outcome("cosmos");
@@ -126,4 +162,13 @@ export class FakeChain implements ServerChain {
       reason: spec.reason ?? d.reason,
     };
   }
+}
+
+/** pqcVerify answered for real; every other eth_call succeeds with no data. */
+function defaultEthCall(req: EthCallRequest): EthCallResult {
+  if (req.to.toLowerCase() !== PQC_VERIFY_ADDRESS) return { status: "success", data: "0x" };
+  const { args } = decodeFunctionData({ abi: PQC_VERIFY_ABI, data: req.data });
+  const [pubkey, signature, message] = args as [Hex, Hex, Hex];
+  const ok = verifyMessage(pubkey, signature, hexToBytes(message));
+  return { status: "success", data: encodeFunctionResult({ abi: PQC_VERIFY_ABI, functionName: "pqcVerify", result: ok }) };
 }

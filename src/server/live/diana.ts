@@ -6,6 +6,8 @@ import {
   AuthenticatorExecutionError,
   classifyEvmWindowRejection,
   fetchAuthenticators,
+  fetchAuthNonce,
+  resolveEvmAuthDigestVersion,
   QoreTxError,
   type TxClient,
 } from "@qorechain/sdk";
@@ -25,7 +27,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { balanceOf, connect, deriveRole, makeClient, retrying } from "../../../scripts/bootstrap/chain";
 import { deriveEvmRole } from "../../../scripts/evm/keys";
 import { decodePqcKeyStatus, encodePqcKeyStatusCall, PQC_KEY_STATUS_ADDRESS } from "../../../scripts/evm/pqcKeyStatus";
-import type { BroadcastOutcome, CosmosMsg, EvmLog, Hex, ServerChain } from "./chain";
+import type { BroadcastOutcome, CosmosMsg, EthCallResult, EvmLog, Hex, ServerChain } from "./chain";
 import type { LiveNetwork, LiveRole } from "./config";
 
 /** Longest a single read may take before it counts as an RPC error. */
@@ -54,6 +56,31 @@ async function evmRead<T>(url: string, method: string, params: unknown[]): Promi
 }
 
 const toHexQty = (n: bigint) => `0x${n.toString(16)}`;
+
+/**
+ * eth_call at latest. A JSON-RPC error that carries revert data (or says "reverted") is the
+ * call's answer; anything else is an RPC error and throws. Retried on rate limiting only.
+ */
+async function evmCall(url: string, call: { from?: Hex; to: Hex; data: Hex; value?: bigint }): Promise<EthCallResult> {
+  const params = [{ from: call.from, to: call.to, data: call.data, value: call.value === undefined ? undefined : toHexQty(call.value) }, "latest"];
+  return retrying(async () => {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: nextId++, method: "eth_call", params }),
+      signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`EVM RPC eth_call: HTTP ${res.status}`);
+    const body = (await res.json()) as { result?: Hex; error?: { code: number; message: string; data?: unknown } };
+    if (body.error) {
+      const data = typeof body.error.data === "string" && body.error.data.startsWith("0x") ? (body.error.data as Hex) : undefined;
+      if (data || /revert/i.test(body.error.message)) return { status: "reverted", data: data ?? "0x", reason: body.error.message };
+      throw new Error(`EVM RPC eth_call: ${body.error.message} (${body.error.code})`);
+    }
+    return { status: "success", data: body.result ?? "0x" };
+  });
+}
 
 function errorText(err: unknown): string {
   const msg = err instanceof BaseError ? err.shortMessage : err instanceof Error ? err.message : String(err);
@@ -166,6 +193,16 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
         revoked: k.revoked,
         expiryUnix: Number(k.expiryUnix),
       }));
+    },
+    ethCall(req) {
+      return evmCall(url, req);
+    },
+    async authNonce(account, pubkey) {
+      const { nonce } = await retrying(() => fetchAuthNonce({ rest: network.rest, address: account, pubkey }));
+      return BigInt(nonce);
+    },
+    evmAuthDigestVersion() {
+      return retrying(() => resolveEvmAuthDigestVersion({ rest: network.rest }));
     },
 
     async sendCosmos(from, messages, opts): Promise<BroadcastOutcome> {

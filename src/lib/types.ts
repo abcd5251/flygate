@@ -135,6 +135,10 @@ export type BookingStep = {
   explorerUrl?: string;
   /** Result of a read-only chain query (eth_call / REST), shown as "Live read". */
   readResult?: string;
+  /** Overrides the step's default call text (e.g. "agent EOA → FlightEscrow.book()"). */
+  msg?: string;
+  /** Overrides the step's default actor (e.g. the merchant-signed proof in Live, D-19). */
+  actor?: "merchant" | "chain" | "agent" | "gate";
 };
 
 export type BookingStatus = "running" | "succeeded" | "refunded" | "blocked";
@@ -149,6 +153,12 @@ export type Booking = {
   quoteSigPreview?: string;
   proofSigPreview?: string;
   scenario: Scenario;
+  /** Names the signed quote for the verify step. */
+  quoteId?: string;
+  /** Live: the on-chain bookingId, fixed by the quote before book() is sent (D-28). */
+  bookingId?: string;
+  /** Live: the quoted price in QOR on diana ("3.89"), shown next to the US$ price (D-14). */
+  priceQor?: string;
 };
 
 export type FeedItem = {

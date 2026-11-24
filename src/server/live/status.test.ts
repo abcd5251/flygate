@@ -196,6 +196,9 @@ test("no response ever contains key material", async () => {
       setupMandate: async () => {
         throw new Error("not used");
       },
+      checkout: async () => {
+        throw new Error("not used");
+      },
     }))).text();
     for (const s of secrets) assert.ok(!body.toLowerCase().includes(s.toLowerCase()), "response leaks key material");
     assert.ok(!/privateKey|secretKey/i.test(body));
