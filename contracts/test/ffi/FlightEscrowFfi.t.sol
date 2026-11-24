@@ -9,7 +9,7 @@ import {FfiPqcVerify} from "../mocks/FfiPqcVerify.sol";
 /// @notice Cross-checks src/lib/escrow.ts against the contract: TS builds the message and signs
 ///         it with real ML-DSA-87 from a fixed seed, and the 0x...0A01 mock verifies it for real.
 ///         If book / confirmTicket accept the signature, Solidity and TS sign the same bytes.
-///         Run with `pnpm test:contracts:ffi` (FOUNDRY_PROFILE=ffi forge test).
+///         Part of plain `forge test` (ffi on); needs `pnpm install` for tsx and noble.
 contract FlightEscrowFfiTest is Test {
     address constant PQC_VERIFY = 0x0000000000000000000000000000000000000a01;
     address constant PQC_KEY_STATUS = 0x0000000000000000000000000000000000000a02;
@@ -79,6 +79,18 @@ contract FlightEscrowFfiTest is Test {
         escrow.book{value: q.priceWei}(q, sig);
     }
 
+    /// A valid ML-DSA-87 signature over the right bytes, but from a key other than the
+    /// merchant's registered one.
+    function test_ffi_bookRevertsWhenSignedByADifferentKey() public {
+        FlightEscrow.Quote memory q = _quote();
+        bytes memory sig = _signQuoteWith(keccak256("flygate-ffi-test-impostor"), q);
+        assertEq(sig.length, 4627, "a real ML-DSA-87 signature");
+
+        vm.expectRevert(FlightEscrow.InvalidSignature.selector);
+        vm.prank(agent);
+        escrow.book{value: q.priceWei}(q, sig);
+    }
+
     function test_ffi_confirmTicketAcceptsRealTsTicketProof() public {
         FlightEscrow.Quote memory q = _quote();
         vm.prank(agent);
@@ -133,6 +145,7 @@ contract FlightEscrowFfiTest is Test {
         return FlightEscrow.Quote({
             merchant: merchant,
             agent: agent,
+            owner: owner,
             offerId: keccak256("off_0001"),
             priceWei: 1 ether,
             origin: "TPE",
@@ -146,22 +159,27 @@ contract FlightEscrowFfiTest is Test {
     }
 
     function _signQuote(FlightEscrow.Quote memory q) internal returns (bytes memory) {
-        string[] memory args = new string[](15);
+        return _signQuoteWith(MERCHANT_SEED, q);
+    }
+
+    function _signQuoteWith(bytes32 seed, FlightEscrow.Quote memory q) internal returns (bytes memory) {
+        string[] memory args = new string[](16);
         args[0] = "sign-quote";
-        args[1] = vm.toString(MERCHANT_SEED);
+        args[1] = vm.toString(seed);
         args[2] = vm.toString(block.chainid);
         args[3] = vm.toString(address(escrow));
         args[4] = vm.toString(q.merchant);
         args[5] = vm.toString(q.agent);
-        args[6] = vm.toString(q.offerId);
-        args[7] = vm.toString(q.priceWei);
-        args[8] = string(abi.encodePacked(q.origin));
-        args[9] = string(abi.encodePacked(q.destination));
-        args[10] = vm.toString(uint256(q.departDay));
-        args[11] = vm.toString(uint256(q.cabin));
-        args[12] = vm.toString(q.refundable);
-        args[13] = vm.toString(uint256(q.expiresAt));
-        args[14] = vm.toString(uint256(q.ticketWindow));
+        args[6] = vm.toString(q.owner);
+        args[7] = vm.toString(q.offerId);
+        args[8] = vm.toString(q.priceWei);
+        args[9] = string(abi.encodePacked(q.origin));
+        args[10] = string(abi.encodePacked(q.destination));
+        args[11] = vm.toString(uint256(q.departDay));
+        args[12] = vm.toString(uint256(q.cabin));
+        args[13] = vm.toString(q.refundable);
+        args[14] = vm.toString(uint256(q.expiresAt));
+        args[15] = vm.toString(uint256(q.ticketWindow));
         return _ffi(args);
     }
 

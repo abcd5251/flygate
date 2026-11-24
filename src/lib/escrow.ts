@@ -44,6 +44,8 @@ export type CityCode = string;
 export type Quote = {
   merchant: Address;
   agent: Address;
+  /** Whose mandate the booking runs under; refunds go here. */
+  owner: Address;
   offerId: Hex; // bytes32
   priceWei: bigint;
   origin: CityCode;
@@ -72,6 +74,7 @@ const quoteAbi = [
     components: [
       { name: "merchant", type: "address" },
       { name: "agent", type: "address" },
+      { name: "owner", type: "address" },
       { name: "offerId", type: "bytes32" },
       { name: "priceWei", type: "uint256" },
       { name: "origin", type: "bytes3" },
@@ -189,7 +192,7 @@ export const signCancelProof = (c: CancelProof, d: Domain, keys: MerchantKeys) =
 /** The FlightEscrow functions and events the e2e script and frontend use (human-readable ABI). */
 export const escrowAbi = parseAbi([
   "struct Mandate { address merchant; uint256 maxFareWei; uint32 maxTickets; uint64 expiresAt; bytes3 origin; bytes3 destination; uint32 departFrom; uint32 departTo; uint8 cabin; bool refundableOnly; bytes32 mandateHash; }",
-  "struct Quote { address merchant; address agent; bytes32 offerId; uint256 priceWei; bytes3 origin; bytes3 destination; uint32 departDay; uint8 cabin; bool refundable; uint64 expiresAt; uint32 ticketWindow; }",
+  "struct Quote { address merchant; address agent; address owner; bytes32 offerId; uint256 priceWei; bytes3 origin; bytes3 destination; uint32 departDay; uint8 cabin; bool refundable; uint64 expiresAt; uint32 ticketWindow; }",
   "struct TicketProof { bytes32 bookingId; bytes32 pnrHash; uint64 issuedAt; }",
   "struct CancelProof { bytes32 bookingId; uint8 reasonCode; }",
   "function setMandate(address agent, Mandate mandate)",

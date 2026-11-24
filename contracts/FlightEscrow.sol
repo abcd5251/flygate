@@ -78,9 +78,11 @@ contract FlightEscrow {
     }
 
     /// @notice A merchant-signed offer. keccak256(abi.encode(quote)) is the bookingId.
+    ///         `owner` picks whose mandate the booking runs under and who gets refunds.
     struct Quote {
         address merchant;
         address agent;
+        address owner;
         bytes32 offerId;
         uint256 priceWei;
         bytes3 origin; // city code
@@ -106,7 +108,7 @@ contract FlightEscrow {
     }
 
     struct AgentMandate {
-        address owner;
+        bool exists;
         bool revoked;
         uint32 ticketsUsed; // locked + released bookings; survives re-setting the mandate
         Mandate mandate;
@@ -123,7 +125,9 @@ contract FlightEscrow {
 
     // ---------------------------------------------------------------------- state
 
-    mapping(address agent => AgentMandate) internal mandates;
+    /// @dev Keyed by (owner, agent): a caller only ever writes its own slot, so nobody can
+    ///      claim or overwrite another owner's mandate for the same agent.
+    mapping(address owner => mapping(address agent => AgentMandate)) internal mandates;
     mapping(bytes32 bookingId => Booking) internal bookings;
 
     // --------------------------------------------------------------------- events
@@ -139,7 +143,6 @@ contract FlightEscrow {
     // --------------------------------------------------------------------- errors
 
     error WrongChain(uint256 chainId);
-    error NotMandateOwner();
     error NoMandate();
     error MerchantMismatch();
     error AgentMismatch();
@@ -170,31 +173,33 @@ contract FlightEscrow {
 
     // ------------------------------------------------------------------- mandates
 
-    /// @notice Set or overwrite the agent's mandate. The first caller becomes the owner;
-    ///         re-setting keeps the used-ticket count.
+    /// @notice Set or overwrite the caller's mandate for `agent`. Re-setting keeps the
+    ///         used-ticket count. It also re-enables an agent the caller revoked earlier:
+    ///         signing a new mandate is how an owner undoes a revoke.
     function setMandate(address agent, Mandate calldata mandate) external {
-        AgentMandate storage m = mandates[agent];
-        if (m.owner == address(0)) m.owner = msg.sender;
-        else if (m.owner != msg.sender) revert NotMandateOwner();
+        AgentMandate storage m = mandates[msg.sender][agent];
+        m.exists = true;
         m.mandate = mandate;
         m.revoked = false;
         emit MandateSet(msg.sender, agent, mandate.merchant, mandate.mandateHash);
     }
 
-    /// @notice Stop the agent from booking. Bookings already locked are unaffected.
+    /// @notice Stop the agent from booking under the caller's mandate. Bookings already locked
+    ///         are unaffected; a later setMandate by the caller re-enables the agent.
     function revokeMandate(address agent) external {
-        AgentMandate storage m = mandates[agent];
-        if (m.owner != msg.sender) revert NotMandateOwner();
+        AgentMandate storage m = mandates[msg.sender][agent];
+        if (!m.exists) revert NoMandate();
         m.revoked = true;
         emit MandateRevoked(msg.sender, agent);
     }
 
     // ------------------------------------------------------------------- bookings
 
-    /// @notice Lock exactly `quote.priceWei` against a merchant-signed quote.
+    /// @notice Lock exactly `quote.priceWei` against a merchant-signed quote, under the mandate
+    ///         `quote.owner` set for the caller. Refunds go to `quote.owner`.
     function book(Quote calldata quote, bytes calldata signature) external payable returns (bytes32 bookingId) {
-        AgentMandate storage m = mandates[msg.sender];
-        if (m.owner == address(0)) revert NoMandate();
+        AgentMandate storage m = mandates[quote.owner][msg.sender];
+        if (!m.exists) revert NoMandate();
         if (m.revoked) revert MandateIsRevoked();
         if (block.timestamp > m.mandate.expiresAt) revert MandateExpired();
         if (quote.agent != msg.sender) revert AgentMismatch();
@@ -217,7 +222,7 @@ contract FlightEscrow {
         m.ticketsUsed += 1;
         bookings[bookingId] = Booking({
             status: Status.Locked,
-            owner: m.owner,
+            owner: quote.owner,
             agent: msg.sender,
             merchant: quote.merchant,
             priceWei: quote.priceWei,
@@ -276,10 +281,10 @@ contract FlightEscrow {
         if (mandate.refundableOnly && !quote.refundable) revert RefundableRequired();
     }
 
-    /// @dev Locked -> Refunded: pay the owner back and return one unit of the agent's quota.
+    /// @dev Locked -> Refunded: pay the owner back and return one unit of the (owner, agent) quota.
     function _refund(bytes32 bookingId, Booking storage b, RefundReason reason) internal {
         b.status = Status.Refunded;
-        mandates[b.agent].ticketsUsed -= 1;
+        mandates[b.owner][b.agent].ticketsUsed -= 1;
         emit Refunded(bookingId, reason);
         _send(b.owner, b.priceWei);
     }

@@ -112,6 +112,7 @@ async function book(ctx: Ctx, flow: string, ticketWindow: number): Promise<{ id:
   const quote: Quote = {
     merchant: ctx.setup.roles.merchant.account.evm,
     agent: ctx.setup.roles.agent.signer.address,
+    owner: ctx.setup.roles.owner.signer.address,
     offerId: keccak256(stringToBytes(`flygate-e2e|${flow}|${now}`)),
     priceWei: FARE_WEI,
     ...ROUTE,

@@ -43,12 +43,50 @@ contract FlightEscrowBookRulesTest is Test {
         _expectBookRevert(_quote(), abi.encodeWithSelector(FlightEscrow.MandateIsRevoked.selector));
     }
 
-    function test_revokeMandate_revertsForNonOwner() public {
-        vm.expectRevert(FlightEscrow.NotMandateOwner.selector);
+    function test_revokeMandate_byAnyoneElse_leavesTheOwnersMandateActive() public {
+        vm.expectRevert(FlightEscrow.NoMandate.selector);
         vm.prank(agent);
         escrow.revokeMandate(agent);
 
-        _bookOk(_quote()); // mandate still active
+        _bookOk(_quote()); // owner's mandate still active
+    }
+
+    // ------------------------------------------------------------- front-run
+
+    /// Anyone can call setMandate for any agent, but it only writes the caller's own
+    /// (owner, agent) slot: the real owner's rules, quota and refunds are untouched.
+    function test_setMandate_byAttackerForSameAgent_cannotTouchOwnersMandateOrRefunds() public {
+        address attacker = makeAddr("attacker");
+        FlightEscrow.Mandate memory evil = _mandate();
+        evil.maxTickets = 0;
+        evil.cabin = FlightEscrow.Cabin.First;
+        vm.prank(attacker);
+        escrow.setMandate(agent, evil);
+        vm.prank(attacker);
+        escrow.revokeMandate(agent);
+
+        bytes32 bookingId = _bookOk(_quote()); // still booked under the owner's mandate
+
+        FlightEscrow.CancelProof memory c = FlightEscrow.CancelProof({bookingId: bookingId, reasonCode: 1});
+        escrow.cancel(c, _allow(keccak256("CANCEL"), abi.encode(c), 0xC1));
+        assertEq(owner.balance, 1 ether, "refund went to the real owner");
+        assertEq(attacker.balance, 0, "attacker got nothing");
+    }
+
+    function test_book_revertsWhenQuoteNamesAnOwnerWithoutAMandate() public {
+        FlightEscrow.Quote memory q = _quote();
+        q.owner = makeAddr("attacker");
+        _expectBookRevert(q, abi.encodeWithSelector(FlightEscrow.NoMandate.selector));
+    }
+
+    /// Intended: a revoke is undone only by the owner signing a new mandate.
+    function test_setMandate_reEnablesARevokedAgent() public {
+        vm.prank(owner);
+        escrow.revokeMandate(agent);
+        _expectBookRevert(_quote(), abi.encodeWithSelector(FlightEscrow.MandateIsRevoked.selector));
+
+        _setMandate(_mandate());
+        _bookOk(_quote());
     }
 
     function test_revokeMandate_lockedBookingCanStillBeTicketed() public {
@@ -276,6 +314,7 @@ contract FlightEscrowBookRulesTest is Test {
         return FlightEscrow.Quote({
             merchant: merchant,
             agent: agent,
+            owner: owner,
             offerId: keccak256("offer-1"),
             priceWei: 1 ether,
             origin: "TPE",
