@@ -97,3 +97,24 @@ export async function registerPqc(
     return ensurePqcRegistered(tx, { pqcKeypair: who.pqcKeypair, rest: network.rest, chainId: network.chainId });
   });
 }
+
+const QOR = BigInt(1_000_000);
+/** Top up agent/merchant only when below this... */
+export const TOP_UP_BELOW = BigInt(5) * QOR;
+/** ...and bring them up to this. */
+export const TOP_UP_TO = BigInt(20) * QOR;
+
+/**
+ * Hybrid-signed owner -> `to` transfer bringing `to` up to TOP_UP_TO when it holds less
+ * than TOP_UP_BELOW. Returns the tx hash, or undefined when no transfer was needed.
+ */
+export async function topUp(client: QoreChainClient, ownerTx: TxClient, to: string): Promise<string | undefined> {
+  // Each attempt re-reads the balance, so a retry after a landed send is a no-op.
+  return retrying(async () => {
+    const balance = await balanceOf(client, to);
+    if (balance >= TOP_UP_BELOW) return undefined;
+    const res = await ownerTx.bankSend(to, [{ denom: DENOM, amount: (TOP_UP_TO - balance).toString() }]);
+    if (res.code !== 0) throw new Error(`Transfer to ${to} failed (code ${res.code}): ${res.rawLog ?? ""}`);
+    return res.transactionHash;
+  });
+}
