@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "next typegen && tsc --noEmit",
     "check:bundle": "next build && tsx scripts/check-bundle.ts",
     "bootstrap": "tsx scripts/bootstrap/index.ts",
     "evm:check": "tsx scripts/evm/check.ts",
