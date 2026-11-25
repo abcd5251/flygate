@@ -3,12 +3,12 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, Check, CheckCircle2, Lock, RotateCcw, ShieldX, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, CheckCircle2, ExternalLink, Lock, RotateCcw, ShieldX, X } from "lucide-react";
 import { AirlineBadge } from "@/components/FlightCard";
 import { EmptyState, FlowBand } from "@/components/FlowBand";
 import { Card, cx, GhostButton, HashText, Pill, PrimaryButton, SourceTag, Spinner } from "@/components/ui";
 import { newBooking, STEP_META } from "@/lib/booking";
-import { ADDRESSES, fakeHash, fakePnr, getChain, liveChain, shortAddr, type ChainStatus } from "@/lib/chain";
+import { ADDRESSES, explorerAddressUrl, fakeHash, fakePnr, getChain, liveChain, shortAddr, type ChainStatus } from "@/lib/chain";
 import { checkOffer, rankOffers } from "@/lib/gate";
 import { formatDateLong, usd } from "@/lib/mandate";
 import { DEMO_OFFERS, formatDuration } from "@/lib/offers";
@@ -49,6 +49,7 @@ export default function CheckoutPage() {
   const [stay, setStay] = useState(false);
   const [live, setLive] = useState<ChainStatus | undefined>();
   const liveRef = useRef<ChainStatus | undefined>(undefined);
+  const escrowAddr = state.mode === "live" ? live?.escrow : ADDRESSES.escrow;
 
   // Live: the deployed FlightEscrow address for the sidebar (public data only).
   useEffect(() => {
@@ -149,9 +150,9 @@ export default function CheckoutPage() {
       }
       if (key === "refund" && r.state === "Refunded" && r.refunded) {
         const amount = b.quotedPriceUsd ?? b.priceUsd;
-        addTx(found(`Refund ${usd(amount)}`, "FlightEscrow.cancel()", r.refunded));
+        addTx(found(`Refund ${usd(amount)}`, "Refunded · FlightEscrow.cancel()", r.refunded));
         const detail = `${b.priceQor ?? "?"} QOR back to your refund address · found on-chain after a reload (Refunded event)`;
-        refunded(amount, { status: "done", detail, actor: "merchant", msg: "FlightEscrow.cancel()", hash: r.refunded.hash, explorerUrl: r.refunded.explorerUrl, source: "live", at: Date.now() });
+        refunded(amount, { status: "done", detail, actor: "merchant", msg: "Refunded · FlightEscrow.cancel()", hash: r.refunded.hash, explorerUrl: r.refunded.explorerUrl, source: "live", at: Date.now() });
         return "stop";
       }
       if (key === "proof" && r.state === "Refunded") {
@@ -254,7 +255,7 @@ export default function CheckoutPage() {
             tx.source === "live"
               ? `${b.priceQor ?? "?"} QOR back to your refund address ${shortAddr(r.refundTo ?? "", 8, 4)} · submitted by agent · ${r.balanceQor ? `balance now ${r.balanceQor}` : (r.readError ?? "balance not read")}`
               : `${amount} fUSD back to ${shortAddr(ADDRESSES.owner, 8, 4)}`;
-          const liveFields: Partial<BookingStep> = tx.source === "live" ? { actor: "merchant", msg: "FlightEscrow.cancel()", readResult: r.readResult } : {};
+          const liveFields: Partial<BookingStep> = tx.source === "live" ? { actor: "merchant", msg: "Refunded · FlightEscrow.cancel()", readResult: r.readResult } : {};
           refunded(amount, { status: "done", detail, ...liveFields, ...txStep(tx), at: Date.now() });
           return "stop";
         }
@@ -567,15 +568,33 @@ export default function CheckoutPage() {
               <Lock className="size-4 text-pq" /> Security
             </p>
             <p className="text-ink">The merchant gets your passport as ML-KEM-1024 ciphertext. The agent never sees it.</p>
-            <div className="flex items-center justify-between">
-              <span className="text-ink-2">Escrow</span>
-              {/* Live shows the deployed FlightEscrow, never the placeholder (D-02, D-21). */}
-              {state.mode === "live" ? live?.escrow ? <HashText value={live.escrow} head={8} tail={4} /> : <span className="text-xs text-muted">not available</span> : <HashText value={ADDRESSES.escrow} head={8} tail={4} />}
-            </div>
+            {/* Live shows the deployed FlightEscrow from the server config, never the placeholder (D-02, D-21). */}
+            {escrowAddr ? (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-2 text-ink-2">
+                  Escrow <Pill tone="pass">Real · diana</Pill>
+                </span>
+                <a
+                  href={explorerAddressUrl(escrowAddr)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`FlightEscrow ${escrowAddr} on the QoreChain explorer`}
+                  className="inline-flex items-center gap-1 font-mono text-xs text-brand hover:underline"
+                >
+                  {shortAddr(escrowAddr, 8, 4)}
+                  <ExternalLink className="size-3" />
+                </a>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between">
+                <span className="text-ink-2">Escrow</span>
+                <span className="text-xs text-muted">not available</span>
+              </div>
+            )}
             <p className="text-xs text-muted">
               {state.mode === "live"
                 ? "Live on diana: steps tagged “Live tx” are real transactions; signatures are real."
-                : "Chain txs are simulated in this demo; signatures are real."}{" "}
+                : "FlightEscrow is deployed on diana; the tx hashes on this page are simulated. Signatures are real."}{" "}
               <Link href="/ticket#proofs" className="text-brand hover:underline">
                 All proofs
               </Link>

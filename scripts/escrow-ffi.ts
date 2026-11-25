@@ -4,7 +4,7 @@
  * here, independently of Solidity.
  *
  *   pubkey      <seed>
- *   sign-quote  <seed> <chainId> <escrow> <merchant> <agent> <offerId> <priceWei> <origin>
+ *   sign-quote  <seed> <chainId> <escrow> <merchant> <agent> <owner> <offerId> <priceWei> <origin>
  *               <destination> <departDay> <cabin> <refundable> <expiresAt> <ticketWindow>
  *   sign-ticket <seed> <chainId> <escrow> <bookingId> <pnrHash> <issuedAt>
  *   sign-cancel <seed> <chainId> <escrow> <bookingId> <reasonCode>
@@ -32,12 +32,13 @@ function run(): Hex {
     case "pubkey":
       return bytesToHex(merchantKeys(args[0] as Hex).publicKey);
     case "sign-quote": {
-      const [seed, chainId, escrow, merchant, agent, offerId, priceWei, origin, destination, ...rest] =
+      const [seed, chainId, escrow, merchant, agent, owner, offerId, priceWei, origin, destination, ...rest] =
         args;
       const [departDay, cabin, refundable, expiresAt, ticketWindow] = rest;
       const quote = {
         merchant: getAddress(merchant),
         agent: getAddress(agent),
+        owner: getAddress(owner),
         offerId: offerId as Hex,
         priceWei: BigInt(priceWei),
         origin,

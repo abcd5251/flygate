@@ -66,7 +66,8 @@ import {
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { connect, deriveRole, makeClient, retrying, type RoleAccount } from "../bootstrap/chain";
 import { ROLES, type Role } from "../bootstrap/env";
-import { DIANA_EVM_CHAIN_ID, evmBalance, evmChainId, pqcKeyStatusOnEvm } from "../evm/chain";
+import { evmBalance, evmChainId, pqcKeyStatusOnEvm } from "../evm/chain";
+import { DIANA_EVM_CHAIN_ID } from "../../src/lib/chain";
 import { deriveEvmRole, type EvmRole } from "../evm/keys";
 import { Cabin, DIANA_CHAIN_ID, quoteMessage, signMessage, verifyMessage, type Quote } from "../../src/lib/escrow";
 import {
@@ -531,6 +532,7 @@ async function probePqcVerify(ctx: Ctx): Promise<void> {
     const quote: Quote = {
       merchant: ctx.evm.merchant.account.evm,
       agent: ctx.evm.owner.account.evm,
+      owner: ctx.evm.owner.signer.address,
       offerId: keccak256(stringToBytes("live-probe")),
       priceWei: uqorToWei(BigInt(3_890_000)),
       origin: "TPE",

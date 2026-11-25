@@ -116,12 +116,15 @@ export function demoQuote(o: {
   mandate: Mandate;
   merchant: Hex;
   agent: Hex;
+  /** Who set the mandate (the setMandate sender, D-10); book() runs under mandates[owner][agent] and refunds go here. */
+  owner: Hex;
   uqorPerUsd: bigint;
   nowMs: number;
 }): Quote {
   return {
     merchant: o.merchant,
     agent: o.agent,
+    owner: o.owner,
     offerId: keccak256(stringToBytes(o.offer.id)),
     priceWei: usdToUqor(o.priceUsd, o.uqorPerUsd) * WEI_PER_UQOR,
     origin: o.mandate.origin.code,
@@ -238,6 +241,7 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
       mandate,
       merchant: k.roles.merchant.account.evm,
       agent: bookSender(config.lane, k),
+      owner: k.roles.owner.signer.address,
       uqorPerUsd: config.uqorPerUsd,
       nowMs: clock.now(),
     });
@@ -324,7 +328,7 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
   }
 
   const PROOF_TEXT: TxText = { label: "Ticket proof on-chain", msg: "FlightEscrow.confirmTicket() · submitted by agent" };
-  const RELEASE_TEXT: TxText = { label: "Payout to merchant", msg: "Released event · confirmTicket()" };
+  const RELEASE_TEXT: TxText = { label: "Payout to merchant", msg: "Released · FlightEscrow.confirmTicket()" };
 
   /** The payout is the `Released` event of the confirmTicket() tx: same hash, same outcome (D-16). */
   function withRelease(proof: ChainTx, sig?: Hex): TicketProofResult {

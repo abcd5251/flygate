@@ -60,7 +60,7 @@ function refundedLog(id: number): EvmLog {
 // ------------------------------------------------------------------ encoding constants
 
 test("selectors and event topics match FlightEscrow (forge inspect)", () => {
-  assert.equal(SELECTORS.book, "0x0ed4e15c");
+  assert.equal(SELECTORS.book, "0x2f876d8c");
   assert.equal(SELECTORS.setMandate, "0xb34ffb44");
   assert.equal(SELECTORS.revokeMandate, "0xdd8b8857");
   assert.equal(SELECTORS.confirmTicket, "0xb387fa48");
@@ -128,7 +128,7 @@ test("link: agent ETH address as a secp256k1 key, evm permission, mandate expiry
   assert.equal(rules.rules.length, 1, "the full rule set, one rule");
   const [rule] = rules.rules;
   assert.equal(rule.enabled, true);
-  assert.deepEqual(rule.allowedEvmCalls, [`${ESCROW}/0x0ed4e15c`]);
+  assert.deepEqual(rule.allowedEvmCalls, [`${ESCROW}/0x2f876d8c`]);
   for (const forbidden of [SELECTORS.setMandate, SELECTORS.revokeMandate]) {
     assert.ok(!rule.allowedEvmCalls.some((c) => c.includes(forbidden.slice(2))), `allows ${forbidden}`);
   }
@@ -307,11 +307,11 @@ test("a failed broadcast is not retried: the repeat gets the same failure, and l
 
 test("a reverted setMandate returns its code and hash, without an explorer link", async () => {
   const chain = await healthyChain();
-  chain.state.outcomes = ["success", "success", { mode: "revert", code: "evm revert", reason: "NotMandateOwner()" }];
+  chain.state.outcomes = ["success", "success", { mode: "revert", code: "evm revert", reason: "execution reverted" }];
   const [, , tx] = await signAll(service(chain));
   assert.equal(tx.ok, false);
   assert.equal(tx.code, "evm revert");
-  assert.match(tx.reason!, /NotMandateOwner/);
+  assert.match(tx.reason!, /execution reverted/);
   assert.match(tx.hash, /^0x/);
   assert.equal(tx.explorerUrl, undefined);
 });

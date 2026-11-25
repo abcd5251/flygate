@@ -163,7 +163,7 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
       return evmRead<Hex>(url, "eth_getCode", [address, "latest"]);
     },
     async pqcKeyStatus(address) {
-      const ret = await evmRead<string>(url, "eth_call", [
+      const ret = await evmRead<Hex>(url, "eth_call", [
         { to: PQC_KEY_STATUS_ADDRESS, data: encodePqcKeyStatusCall(address) },
         "latest",
       ]);

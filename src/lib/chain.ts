@@ -9,18 +9,26 @@ import type { ChainTx, DemoMode, LiveAddresses, Mandate, Scenario, TxKind, TxSou
  * keys or `@qorechain/sdk`; live signing happens on the server (ADR-0001).
  */
 
+/** diana's EVM chain id. FlightEscrow's constructor refuses any other chain. */
+export const DIANA_EVM_CHAIN_ID = 9800;
+/** 1 uqor (6 decimals, bank) = 1e12 wei (18 decimals, EVM). */
+export const WEI_PER_UQOR = BigInt(1_000_000_000_000);
+
 export const CHAIN = {
   name: "QoreChain diana",
   chainId: "qorechain-diana",
-  evmChainId: 9800,
+  evmChainId: DIANA_EVM_CHAIN_ID,
   explorer: "https://explore.qore.network",
 };
+
+export const explorerAddressUrl = (address: string) => `${CHAIN.explorer}/address/${address}`;
 
 export const ADDRESSES = {
   owner: "qor1u7x3k9p2m4d8f6h5j0l2n4q6s8t0v2w4y6z8k2f",
   agent: "qor1agt9w2e4r6t8y0u2i4o6p8a0s2d4f6g8h0j7k2",
   merchant: "qor1mrc5z7x9c1v3b5n7m9q1w3e5r7t9y1u3i5o3p8",
-  escrow: "0x7a3fd91c02b5e64a18c9f0d27e3b5a6c4d8ec41e",
+  /** FlightEscrow on diana (deployments/diana.json). */
+  escrow: "0xAEF0d6a8B85A9a95091818c3142B8b065C7fCE10",
   attacker: "0xbad0c0ffee000000000000000000000000dead00",
   pqcVerify: "0x0000000000000000000000000000000000000a01",
 };
@@ -146,7 +154,7 @@ export type FareCapCheck = {
 
 /**
  * Whether this chain can run the demo. Live: what /api/live/status reports (public data only);
- * `escrow` is the deployed FlightEscrow, never the placeholder `ADDRESSES.escrow`.
+ * `escrow` is the FlightEscrow from the server config (`FLIGHT_ESCROW_ADDRESS`).
  */
 export type ChainStatus = {
   available: boolean;
@@ -234,14 +242,14 @@ export const simulatedChain: ChainPort = {
     const verified = await pqcVerifyMerchant(payload, r.sig);
     return {
       proof: makeTx("Ticket proof on-chain", "FlightEscrow.confirmTicket()", "merchant"),
-      release: makeTx("Payout to merchant", "Released event · confirmTicket()", "contract"),
+      release: makeTx("Payout to merchant", "Released · FlightEscrow.confirmTicket()", "contract"),
       sigBytes: r.sigBytes,
       sigPreview: preview(r.sig),
       verified,
     };
   },
   async cancelBooking({ amountUsd }) {
-    return { tx: makeTx(`Refund ${usd(amountUsd)}`, "FlightEscrow.cancel()", "contract") };
+    return { tx: makeTx(`Refund ${usd(amountUsd)}`, "Refunded · FlightEscrow.cancel()", "contract") };
   },
   async checkFareCap() {
     return { source: "simulated", tx: makeTx("Backup on-chain check: overspend rejected", "perTxLimit", "agent", false, "abstractaccount 5") };

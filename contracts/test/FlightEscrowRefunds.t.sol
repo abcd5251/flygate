@@ -129,6 +129,19 @@ contract FlightEscrowRefundsTest is Test {
         escrow.book{value: q.priceWei}(q, sig);
     }
 
+    function test_book_quotaStaysExhaustedAfterOwnerResetsTheMandate() public {
+        _book(1);
+        _book(2);
+        vm.prank(owner);
+        escrow.setMandate(agent, _mandate(2)); // same quota, fresh terms: the used count stays 2
+        FlightEscrow.Quote memory q = _quote(3);
+        bytes memory sig = _allow(keccak256("QUOTE"), abi.encode(q), 0xA1);
+
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.TicketQuotaExhausted.selector, 2));
+        vm.prank(agent);
+        escrow.book{value: q.priceWei}(q, sig);
+    }
+
     function test_book_worksAgainAfterCancelRestoresQuota() public {
         bytes32 first = _book(1);
         _book(2);
@@ -261,6 +274,7 @@ contract FlightEscrowRefundsTest is Test {
         return FlightEscrow.Quote({
             merchant: merchant,
             agent: agent,
+            owner: owner,
             offerId: keccak256(abi.encode("offer", offerSeed)),
             priceWei: 1 ether,
             origin: "TPE",

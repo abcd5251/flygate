@@ -214,6 +214,7 @@ contract FlightEscrowTest is Test {
         return FlightEscrow.Quote({
             merchant: merchant,
             agent: agent,
+            owner: owner,
             offerId: keccak256("offer-1"),
             priceWei: 1 ether,
             origin: "TPE",

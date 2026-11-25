@@ -15,7 +15,7 @@
 | **讓看不見的閘門看得見** | 簽署後頂部一直顯示「授權狀態列」（已花／上限／到期／agent 私鑰狀態）。每張航班卡片底部都有閘門結果。下單時用逐步的「通關進度」呈現。 |
 | **AI 理解，程式決定** | 畫面上分成兩種角色：藍色是 **Agent**，負責理解需求、排序航班；綠色是 **閘門**，用固定的程式和鏈上規則決定能不能買。右側動態紀錄寫明是誰做了什麼。 |
 | **每個「出事」都有畫面** | 票價變動會被閘門擋下；下單失敗會自動退款；私鑰外洩有攻擊演習。這三段是贏過其他作品的關鍵。 |
-| **誠實標示真假** | 簽章與加密在瀏覽器裡實際計算，標成紫色「Real crypto」；鏈上交易目前是模擬的，標成灰色「Simulated tx」。 |
+| **誠實標示真假** | 簽章與加密在瀏覽器裡實際計算，標成紫色「Real crypto」；FlightEscrow 合約真的部署在 diana，結帳頁標成「Real · diana」並連到瀏覽器；頁面上的交易雜湊仍是模擬的，標成灰色「Simulated tx」。 |
 
 ## 六個畫面
 
@@ -118,7 +118,10 @@ Agent：讀取授權 → 查價 → 閘門檢查 → 排序 → 倒數 ──▶
 | 閘門規則檢查 | **真的**，`src/lib/gate.ts` | 保留，並在合約裡重複檢查 |
 | 一句話解析 | 規則式解析（`parseIntent`） | 換成 Claude，解析結果仍要經過同一個閘門 |
 | 航班報價、訂單 | 模擬資料（Duffel Airways ＋ 虛構航空公司） | Next.js route handler 呼叫 Duffel 測試模式 API |
-| 鏈上交易（綁定、規則、window、鎖款、放款、退款） | 模擬，交易雜湊是隨機值 | `@qorechain/sdk`：`linkAuthenticatorMsgs`、`openEvmWindowMsg`、`MsgExecuteEVM` |
+| 鎖款（`book()`，`pqcVerify` 驗商家報價） | **真的（diana）**：[book](https://explore.qore.network/tx/0x68557823256ccc7a0b01f8b7814de520ae66998574fec8df5a7d879c823e0a2c)，351,734 gas | 網頁顯示 `FlightEscrow` [`0xAEF0d6a8…CE10`](https://explore.qore.network/address/0xAEF0d6a8B85A9a95091818c3142B8b065C7fCE10)（Real · diana），交易雜湊仍是模擬的 |
+| 放款（`confirmTicket()` 驗開票證明，發出 `Released`） | **真的（diana）**：[confirmTicket](https://explore.qore.network/tx/0xe8050f43da7c493cd40d1dfcf468e5f0d20ee1960912c1ec6d9924790ba5e971)，238,661 gas，商家收到 1 QOR | 同上 |
+| 退款（`cancel()` 商家失敗證明；`refund()` 逾時） | **真的（diana）**：[book](https://explore.qore.network/tx/0x1c3d97028798fdd7d1c59a2b4e618f175d2fe351b0fab2b8e7dc52835f491565) → [cancel](https://explore.qore.network/tx/0x830326a3215b838fcf00ffbdfbfe6a39a8f87d6613c10cfbfcfc208f9eb40717)（243,690 gas）；[book](https://explore.qore.network/tx/0xf73140e3e3c6fb08c14d63710d1702bea8f7b48815ce355b9e96783906db9540) → 等 120 秒 → [refund](https://explore.qore.network/tx/0x1e17565c5ee8d038c1d76589fbbdc2777aed214bccca00d03f0b85571bca5d95)（50,112 gas）；退款都回到 owner | 同上 |
+| 其他鏈上交易（綁定 agent 私鑰、支出規則） | 模擬，交易雜湊是隨機值 | `@qorechain/sdk`：`linkAuthenticatorMsgs` |
 | 攻擊錯誤碼 | 取自 QoreChain 文件 | 在 diana 測試網實際送出攻擊交易 |
 
 ## 接上真實服務的順序
@@ -126,7 +129,11 @@ Agent：讀取授權 → 查價 → 閘門檢查 → 排序 → 倒數 ──▶
 QoreChain 規定 agent 必須真的在鏈上動作，所以要按這個順序把模擬換掉：
 
 1. **鏈上部分**（`src/lib/chain.ts`）：建立 owner、agent、商家三個 diana 帳號；用 `ensurePqcRegistered` 註冊 ML-DSA-87；`linkAuthenticatorMsgs` 綁定 agent 私鑰與支出規則；`openEvmWindowMsg` 開限範圍 window。
-2. **FlightEscrow 合約**：`book()` 呼叫 `pqcVerify` 驗商家報價並鎖款；`confirmTicket()` 驗開票證明後放款；`refund()` 逾時或失敗時退款。用 Foundry 寫測試。
+2. ~~**FlightEscrow 合約**：`book()` 呼叫 `pqcVerify` 驗商家報價並鎖款；`confirmTicket()` 驗開票證明後放款；`refund()` 逾時或失敗時退款。用 Foundry 寫測試。~~ **完成**：已部署到 diana [`0xAEF0d6a8B85A9a95091818c3142B8b065C7fCE10`](https://explore.qore.network/address/0xAEF0d6a8B85A9a95091818c3142B8b065C7fCE10)（[部署交易](https://explore.qore.network/tx/0x45559abede2aba2ebba1cfe6566c0fa96cdfb20b31bbdab74ae991726502e4c5)，區塊 10664415；[setMandate](https://explore.qore.network/tx/0x02d1605f7d54bbc8df2ca78b19ba8713a6ca6639f4ec1786f19f6e7255553d4c)），三種結果都在測試網跑過。授權以 (owner, agent) 為鍵：誰呼叫 `setMandate` 就只寫自己那一格，報價裡由商家簽進 `owner`，退款回給它。這輪的鏈上準備：agent signer 只補差額 1.722955 QOR（[bank send](https://explore.qore.network/tx/42A7A3A1101F815A20F1BDF150118BED03EBD6F3D4536A609BEFD787E5F30A26)）；owner [EVM window](https://explore.qore.network/tx/C0DB65EAF0D5B6F38B88487137C0D4C0F5A153F62E4F617F40211EC18D21B47C)（2 筆，只夠部署＋setMandate 的 gas）；agent [EVM window](https://explore.qore.network/tx/EA5D9E79F5A2016A61894E508FE678285CA46C5A7AC082A5AD0E4D139CDD19DD)（6 筆，3 × 1 QOR ＋ gas，只能打新合約）；兩個 window 都是 900 區塊（約 15 分鐘）。紀錄在 `deployments/diana.json`；重跑用 `pnpm escrow:deploy`、`pnpm escrow:e2e`。
+
+   **已取代**：第一版 [`0x7e9eCaBf…D97C`](https://explore.qore.network/address/0x7e9eCaBf07fAde561d4022A53ca7865c7531D97C)（[部署](https://explore.qore.network/tx/0x1c246db3ab6b4c90c7fd0b12e3dc0707a241d4d00d9b1cf3b9dbfc7902bd3a9f)，區塊 10662861）讓第一個呼叫 `setMandate` 的人永遠成為 agent 的 owner，可以被搶先，所以換掉。它的三種結果：[book](https://explore.qore.network/tx/0xe1e2d8823921c4c6887846000c565f35eaa1e22ccf0a6b251c4c503f4ec6a542) → [confirmTicket](https://explore.qore.network/tx/0xe2b5472ae2a4868beee1579f6dc1c4a35c4c9d9ea161e781beb67728b9763549)；[book](https://explore.qore.network/tx/0x13e9ae56fd461ff852e2da1e07d78134aa755c2e136744fabd6b54a3364a8e53) → [cancel](https://explore.qore.network/tx/0x427a462c072396b584baa7ccb6423c87d864f3e69d0bac8aa5fc9e1bf3fa71b1)；[book](https://explore.qore.network/tx/0x885a27e40fd0426167a3258f670eeb54527fe422e348d90add8e14cfe148bda8) → [refund](https://explore.qore.network/tx/0x1c0088f2f3bd4750d827da6774ef22957e9c6e585d4ee7454528d8420aa81dd6)。紀錄在 `deployments/diana.json` 的 `superseded`。
+
+   合約測試：先 `pnpm install`，再直接 `forge test`。預設就開 ffi，`contracts/test/ffi` 會呼叫 `node_modules/.bin/tsx scripts/escrow-ffi.ts`，用真的 ML-DSA-87 交叉驗證 `src/lib/escrow.ts` 和合約簽的是同一組位元組；沒先裝套件，這幾個測試會失敗。
 3. **Duffel**：新增 `src/app/api/offers/route.ts` 與 `src/app/api/orders/route.ts`，金鑰只放在伺服器環境變數 `DUFFEL_TEST_TOKEN`。
 4. **攻擊演習**：把 `runOne()` 改成真的用 agent 私鑰送交易，錯誤碼直接顯示鏈上回傳的結果。
 5. **Claude**：把 `parseIntent()` 換成 Claude，排序理由也由 Claude 產生；閘門與合約不變。
@@ -151,6 +158,9 @@ QoreChain 規定 agent 必須真的在鏈上動作，所以要按這個順序把
 | 公開端點 | `rpc-testnet.qore.host`、`api-testnet.qore.host`、`evm-testnet.qore.host` 每 IP 限流，腳本要重試 |
 | PQC 狀態查詢 | REST `GET {rest}/qorechain/pqc/v1/account/{address}`（SDK `fetchPqcStatus`）；公開端點不提供 `qor_*` JSON-RPC |
 | EVM 端的帳號 | bootstrap 帳號（coin 118）在 EVM 端就是 qor1 那 20 bytes 的 hex：餘額相同，`pqcKeyStatus`（eth_call 0x…0A02）也查得到它的 ML-DSA-87 金鑰。但沒有 EVM 私鑰能從這個地址送交易（EVM 送件人是 keccak(pubkey)）。所以每個角色有兩個 EVM 地址：account（商家地址、收款、查金鑰用）與 signer（同一組助記詞的 coin-60 金鑰，送 deploy／setMandate／book 用，要另外補款）。`pnpm evm:check` 唯讀檢查，`scripts/evm/` 提供 helper |
+| EVM 交易的門檻 | 送 EVM 交易的帳號必須（1）自己註冊 ML-DSA-87 金鑰，並附擁有證明；（2）先用混合簽章的 Cosmos 交易 `MsgOpenEVMWindow` 開一個 EVM window，限定區塊數、交易數、總額（`maxValue` 以 uqor 計，包含轉帳金額加上每筆的 gasLimit × maxFeePerGas），還可以限定收款合約（`allowedTargets`）。少了任何一項，EVM RPC 會回 `no usable registered post-quantum key` / `no open EVM authorisation window`。coin-60 signer 用 SDK 的 `deriveUnifiedAccount` + `EthNativeSigner` 簽 Cosmos 交易（註冊用 classical，開 window 用 hybrid）。開 window 會讓 EVM nonce 加一。`scripts/escrow/native.ts` 有這兩步，都會先查鏈上狀態才送 |
+| forge 廣播 | `forge script --broadcast` 被拒時會自己重送（"after 4 attempts"）。所以部署只用 forge 模擬，再由 `scripts/escrow/tx.ts` 簽名並只送一次；送出出錯時會先查 receipt 和 nonce，不會重送 |
+| EVM gas（實測） | base fee 100 gwei；現行合約：部署 1,673,638、`setMandate` 140,660、`book` 351,734、`confirmTicket` 238,661、`cancel` 243,690、`refund` 50,112（第一版：部署 1,661,885、`setMandate` 140,777、`book` 350,823、`confirmTicket` 239,069、`cancel` 243,746、`refund` 50,026）。`pqcVerify` 單獨呼叫估計約 312k（含 calldata） |
 
 **live-checkout 依賴的鏈上行為（#17，`pnpm live:probe`）：**
 

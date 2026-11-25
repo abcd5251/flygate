@@ -8,7 +8,8 @@
 import { derivePqcCanonical, fromBase } from "@qorechain/sdk";
 import { balanceOf, makeClient } from "../bootstrap/chain";
 import { ROLES, type Role } from "../bootstrap/env";
-import { DIANA_EVM_CHAIN_ID, evmBalance, evmChainId, loadEvmSetup, pqcKeyStatusOnEvm, WEI_PER_UQOR } from "./chain";
+import { DIANA_EVM_CHAIN_ID, WEI_PER_UQOR } from "../../src/lib/chain";
+import { evmBalance, evmChainId, loadEvmSetup, pqcKeyStatusOnEvm } from "./chain";
 import { ALGORITHM_ML_DSA_87 } from "./pqcKeyStatus";
 
 /** Roles whose EVM signer sends transactions in the e2e flow. */
@@ -53,7 +54,7 @@ async function main(): Promise<void> {
   console.log(`  possessionProven  ${status.possessionProven}`);
   console.log(`  pubkey            ${status.pubkey.length} bytes, ${pubkeyMatches ? "matches" : "DOES NOT match"} derivePqcCanonical`);
   if (!status.registered) problems.push("merchant: no ML-DSA-87 key registered");
-  if (status.algorithmId !== ALGORITHM_ML_DSA_87) problems.push(`merchant: algorithmId ${status.algorithmId}, expected 1`);
+  if (status.algorithmId !== ALGORITHM_ML_DSA_87) problems.push(`merchant: algorithmId ${status.algorithmId}, expected ${ALGORITHM_ML_DSA_87}`);
   if (!status.possessionProven) problems.push("merchant: key registered without proof of possession");
   if (!pubkeyMatches) problems.push("merchant: on-chain pubkey differs from the one derived from MERCHANT_MNEMONIC");
 

@@ -150,6 +150,7 @@
 - 衝突：無
 - 狀態：有效
 - 影響到：spec §3、spec §4.3、spec §4.4、spec §7、#17、#20、#23、#25
+- 2026-11-25 補記（合併 flight-escrow 7f3fc25）：合約改成 `mandates[owner][agent]`，`Quote` 多了商家簽名的 `owner` 欄位，`book()` 依 `mandates[quote.owner][msg.sender]` 檢查，退款付給 `quote.owner`。本決策的拓樸不變：`quote.owner` 填 owner 的 EVM signer（`setMandate` 的送出者），`quote.agent` 仍是 `book()` 的 `msg.sender`。原依據的行號已過時。
 
 ### D-11 D-09 和 D-10 依賴的鏈上行為都還沒驗證過（`MsgExecuteEVM` 的 `msg.sender` 是誰、coin-60 signer 送 EVM 交易前是否也要註冊 PQC 並開 window、`allowedEvmCalls` 能不能限制到函式 selector）。怎麼降低風險？
 - 分支：帳號拓樸與 lane > 未驗證的事實

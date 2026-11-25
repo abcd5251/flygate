@@ -48,7 +48,7 @@ const execMsg = (chain: FakeChain, i = 0) => {
   return msgs[0].value as ExecMsg;
 };
 
-type DecodedQuote = { merchant: Hex; agent: Hex; offerId: Hex; priceWei: bigint; origin: Hex; destination: Hex; departDay: number; cabin: number; refundable: boolean; expiresAt: bigint; ticketWindow: number };
+type DecodedQuote = { merchant: Hex; agent: Hex; owner: Hex; offerId: Hex; priceWei: bigint; origin: Hex; destination: Hex; departDay: number; cabin: number; refundable: boolean; expiresAt: bigint; ticketWindow: number };
 function decodeBook(data: Hex) {
   const d = decodeFunctionData({ abi: FLIGHT_ESCROW_ABI, data });
   assert.equal(d.functionName, "book");
@@ -95,7 +95,7 @@ test("Ticketed: exactly 2 broadcasts (book via MsgExecuteEVM, confirmTicket via 
 
   assert.equal(proof.release.hash, proof.proof.hash);
   assert.equal(proof.release.explorerUrl, proof.proof.explorerUrl);
-  assert.equal(proof.release.msg, "Released event · confirmTicket()");
+  assert.equal(proof.release.msg, "Released · FlightEscrow.confirmTicket()");
   assert.equal(proof.release.source, "live");
 });
 
@@ -119,6 +119,7 @@ test("book(): the quote in the MsgExecuteEVM calldata maps the demo offer (D-14,
   assert.equal(quote.expiresAt, BigInt(NOW_MS / 1000 + 20 * 60));
   assert.equal(quote.merchant.toLowerCase(), r.merchant.account.evm.toLowerCase());
   assert.equal(quote.agent.toLowerCase(), r.owner.account.evm.toLowerCase(), "book() runs from the owner account's 0x (ADR-0002)");
+  assert.equal(quote.owner.toLowerCase(), r.owner.signer.address.toLowerCase(), "the setMandate sender owns the mandate; refunds go there (D-10)");
   assert.equal(signature.length, 2 + 4627 * 2);
 
   // The relayer is the agent's qor1; the call acts for the owner account; the server picked the bookingId.

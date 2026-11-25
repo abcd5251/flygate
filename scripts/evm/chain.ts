@@ -2,12 +2,9 @@
 import { resolve } from "node:path";
 import { retrying } from "../bootstrap/chain";
 import { loadEnv, ROLES, type NetworkSettings, type Role } from "../bootstrap/env";
-import { deriveEvmRole, type EvmRole, type Hex } from "./keys";
+import type { Hex } from "viem";
+import { deriveEvmRole, type EvmRole } from "./keys";
 import { decodePqcKeyStatus, encodePqcKeyStatusCall, PQC_KEY_STATUS_ADDRESS, type PqcKeyStatus } from "./pqcKeyStatus";
-
-export const DIANA_EVM_CHAIN_ID = 9800;
-/** 1 uqor (6 decimals, bank) = 1e12 wei (18 decimals, EVM). */
-export const WEI_PER_UQOR = BigInt(1_000_000_000_000);
 
 export const ENV_PATH = resolve(import.meta.dirname, "../../.env.local");
 
@@ -55,7 +52,7 @@ export async function evmBalance(url: string, address: Hex): Promise<bigint> {
 
 /** `pqcKeyStatus(address)` on 0x...0A02 via eth_call, exactly as FlightEscrow reads it. */
 export async function pqcKeyStatusOnEvm(url: string, address: Hex): Promise<PqcKeyStatus> {
-  const ret = await evmRpc(url, "eth_call", [
+  const ret = await evmRpc<Hex>(url, "eth_call", [
     { to: PQC_KEY_STATUS_ADDRESS, data: encodePqcKeyStatusCall(address) },
     "latest",
   ]);
