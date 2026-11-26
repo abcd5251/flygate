@@ -65,6 +65,7 @@ test("Ticketed: exactly 2 broadcasts (book via MsgExecuteEVM, confirmTicket via 
   const sent = chain.broadcasts();
   assert.deepEqual(sent.map((c) => [c.method, c.args[0]]), [["sendCosmos", "agent"], ["sendEvm", "agent"]]);
   assert.equal((sent[0].args[2] as BroadcastOptions).authenticatorExecutions, true, "book() results must be checked: code 0 can be a failed execution");
+  assert.equal((sent[0].args[2] as BroadcastOptions).extraGas, Number(BOOK_GAS_LIMIT), "the tx must provision book()'s signed gas_limit on top of its estimate");
   for (const c of sent) assert.equal((c.args[2] as BroadcastOptions).timeoutMs, 30_000);
 
   // quote: real ML-DSA-87, no tx

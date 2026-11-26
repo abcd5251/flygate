@@ -53,7 +53,8 @@ export const TICKET_WINDOW_SECONDS = 600;
 /**
  * MsgExecuteEVM gas limit for book(). The chain runs the call with exactly this limit; book()
  * verifies an ML-DSA-87 signature through the precompile, so it is generous. An assumption until
- * the B-stage run measures it.
+ * the B-stage run measures it. The tx carrying it gets this much gas on top of its estimate
+ * (`extraGas`), or the chain refuses it as under-provisioned.
  */
 export const BOOK_GAS_LIMIT = BigInt(2_000_000);
 
@@ -322,7 +323,7 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
         digestVersion,
       });
       // Code 0 can still be a failed execution: the chain checks the execution results (D-09).
-      return asCached(tx.fromOutcome("agent", text, await chain.sendCosmos("agent", [msg], { ...opts, authenticatorExecutions: true })));
+      return asCached(tx.fromOutcome("agent", text, await chain.sendCosmos("agent", [msg], { ...opts, authenticatorExecutions: true, extraGas: Number(BOOK_GAS_LIMIT) })));
     };
     return (await once("lock", id, run, (err) => ({ broadcast: true, ok: false, response: tx.refused("agent", b ? lockText(b) : unknown, "internal error", errorText(err)).tx }))) as ChainTx;
   }

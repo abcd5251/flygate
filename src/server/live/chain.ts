@@ -31,6 +31,12 @@ export interface BroadcastOptions {
    * authorised execution, so its results are checked and a failure is `reverted` (D-09).
    */
   authenticatorExecutions?: boolean;
+  /**
+   * Cosmos only: gas added on top of the "auto" estimate. The chain provisions a MsgExecuteEVM's
+   * signed gas_limit in full (v3.2.3) and refuses a tx whose gas leaves less for the call; the
+   * estimate only covers what the call used.
+   */
+  extraGas?: number;
 }
 
 /**

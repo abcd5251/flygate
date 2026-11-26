@@ -29,6 +29,7 @@ import { deriveEvmRole } from "../../../scripts/evm/keys";
 import { decodePqcKeyStatus, encodePqcKeyStatusCall, PQC_KEY_STATUS_ADDRESS } from "../../../scripts/evm/pqcKeyStatus";
 import type { BroadcastOutcome, CosmosMsg, EthCallResult, EvmLog, Hex, ServerChain } from "./chain";
 import type { LiveNetwork, LiveRole } from "./config";
+import { withExtraGas } from "./fee";
 import { linkedKeysOrNone } from "./linked-keys";
 
 /** Longest a single read may take before it counts as an RPC error. */
@@ -216,7 +217,9 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
       }
       try {
         // Broadcast once ("commit" waits for inclusion); never retried.
-        const res = await within(tx.signAndBroadcast(messages as CosmosMsg[] as Parameters<TxClient["signAndBroadcast"]>[0], "auto"), opts.timeoutMs);
+        const msgs = messages as CosmosMsg[] as Parameters<TxClient["signAndBroadcast"]>[0];
+        const fee = opts.extraGas ? withExtraGas(await tx.resolveFee(msgs, "auto", undefined), opts.extraGas) : "auto";
+        const res = await within(tx.signAndBroadcast(msgs, fee), opts.timeoutMs);
         if (res.code !== 0) {
           return { status: "reverted", lane, hash: res.transactionHash, code: `code ${res.code}`, reason: res.rawLog ?? "" };
         }
