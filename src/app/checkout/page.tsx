@@ -3,12 +3,12 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, Check, CheckCircle2, Lock, RotateCcw, ShieldX, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, CheckCircle2, ExternalLink, Lock, RotateCcw, ShieldX, X } from "lucide-react";
 import { AirlineBadge } from "@/components/FlightCard";
 import { EmptyState, FlowBand } from "@/components/FlowBand";
 import { Card, cx, GhostButton, HashText, Pill, PrimaryButton, SourceTag, Spinner } from "@/components/ui";
 import { newBooking, STEP_META } from "@/lib/booking";
-import { ADDRESSES, fakeHash, fakePnr, makeTx, shortAddr } from "@/lib/chain";
+import { ADDRESSES, explorerAddressUrl, fakeHash, fakePnr, makeTx, shortAddr } from "@/lib/chain";
 import { checkOffer, rankOffers } from "@/lib/gate";
 import { formatDateLong, usd } from "@/lib/mandate";
 import { DEMO_OFFERS, formatDuration, PRICE_CHANGE_USD } from "@/lib/offers";
@@ -105,7 +105,7 @@ export default function CheckoutPage() {
             await wait(1200);
             if (cancelled) return "stop";
             const amount = b.quotedPriceUsd ?? b.priceUsd;
-            const tx = makeTx(`Refund ${usd(amount)}`, "FlightEscrow.refund()", "contract");
+            const tx = makeTx(`Refund ${usd(amount)}`, STEP_META.refund.msg!, "contract");
             addTx(tx);
             update((st) => ({
               ...st,
@@ -145,7 +145,7 @@ export default function CheckoutPage() {
           return ok ? "next" : "stop";
         }
         case "release": {
-          const tx = makeTx("Payout to merchant", "FlightEscrow.release()", "contract");
+          const tx = makeTx("Payout to merchant", STEP_META.release.msg!, "contract");
           addTx(tx);
           update((st) => ({
             ...st,
@@ -277,7 +277,12 @@ export default function CheckoutPage() {
                       {st.detail && <p className={cx("mt-1 text-sm", st.status === "failed" ? "text-block" : "text-ink-2")}>{st.detail}</p>}
                     </div>
                     <div className="hidden shrink-0 pt-1 text-right sm:block">
-                      {st.hash && <HashText value={st.hash} head={8} tail={4} />}
+                      {st.hash && (
+                        <div className="flex items-center justify-end gap-2">
+                          <HashText value={st.hash} head={8} tail={4} />
+                          <SourceTag real={false} />
+                        </div>
+                      )}
                       {st.at && <p className="tabular text-[11px] text-muted">{new Date(st.at).toLocaleTimeString("zh-TW", { hour12: false })}</p>}
                     </div>
                   </li>
@@ -327,12 +332,23 @@ export default function CheckoutPage() {
               <Lock className="size-4 text-pq" /> Security
             </p>
             <p className="text-ink">The merchant gets your passport as ML-KEM-1024 ciphertext. The agent never sees it.</p>
-            <div className="flex items-center justify-between">
-              <span className="text-ink-2">Escrow</span>
-              <HashText value={ADDRESSES.escrow} head={8} tail={4} />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-2 text-ink-2">
+                Escrow <Pill tone="pass">Real · diana</Pill>
+              </span>
+              <a
+                href={explorerAddressUrl(ADDRESSES.escrow)}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`FlightEscrow ${ADDRESSES.escrow} on the QoreChain explorer`}
+                className="inline-flex items-center gap-1 font-mono text-xs text-brand hover:underline"
+              >
+                {shortAddr(ADDRESSES.escrow, 8, 4)}
+                <ExternalLink className="size-3" />
+              </a>
             </div>
             <p className="text-xs text-muted">
-              Chain txs are simulated in this demo; signatures are real.{" "}
+              FlightEscrow is deployed on diana; the tx hashes on this page are simulated. Signatures are real.{" "}
               <Link href="/ticket#proofs" className="text-brand hover:underline">
                 All proofs
               </Link>

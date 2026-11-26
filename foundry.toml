@@ -1,0 +1,16 @@
+[profile.default]
+src = "contracts"
+test = "contracts/test"
+script = "contracts/script"
+libs = ["contracts/lib"]
+out = "contracts/out"
+cache_path = "contracts/cache"
+solc_version = "0.8.28"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+evm_version = "cancun"
+remappings = ["forge-std/=contracts/lib/forge-std/src/"]
+# The ffi cross-check tests (contracts/test/ffi) shell out to `node_modules/.bin/tsx
+# scripts/escrow-ffi.ts` and verify real ML-DSA-87, so `forge test` needs `pnpm install` first.
+ffi = true
