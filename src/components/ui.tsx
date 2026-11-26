@@ -34,12 +34,40 @@ export function Pill({ tone = "muted", children, className }: { tone?: Tone; chi
   );
 }
 
-/** Marks a value as computed for real in the browser vs a simulated chain transaction. */
-export function SourceTag({ real }: { real: boolean }) {
-  return real ? <Pill tone="pq">Real crypto</Pill> : <Pill tone="muted">Simulated tx</Pill>;
+/**
+ * Where a value came from: real crypto computed in the browser, a live tx on diana, a live
+ * read-only query (eth_call / REST), or a simulated chain transaction.
+ */
+export type SourceKind = "crypto" | "live-tx" | "live-read" | "simulated";
+
+const SOURCE_TAGS: Record<SourceKind, { tone: Tone; label: string }> = {
+  crypto: { tone: "pq", label: "Real crypto" },
+  "live-tx": { tone: "pass", label: "Live tx · diana" },
+  "live-read": { tone: "brand", label: "Live read" },
+  simulated: { tone: "muted", label: "Simulated tx" },
+};
+
+export function SourceTag({ kind }: { kind: SourceKind }) {
+  const t = SOURCE_TAGS[kind];
+  return <Pill tone={t.tone}>{t.label}</Pill>;
 }
 
-export function HashText({ value, className, head = 10, tail = 6 }: { value: string; className?: string; head?: number; tail?: number }) {
+export const EXPLORER_TOOLTIP = "Explorer: switch to Testnet";
+
+export function HashText({
+  value,
+  className,
+  head = 10,
+  tail = 6,
+  explorerUrl,
+}: {
+  value: string;
+  className?: string;
+  head?: number;
+  tail?: number;
+  /** When set, the hash links to the explorer; copying stays available next to it. */
+  explorerUrl?: string;
+}) {
   const [copied, setCopied] = useState(false);
   const short = value.length > head + tail + 1 ? `${value.slice(0, head)}…${value.slice(-tail)}` : value;
   async function copy() {
@@ -51,6 +79,19 @@ export function HashText({ value, className, head = 10, tail = 6 }: { value: str
       setCopied(false);
     }
   }
+  const icon = copied ? <Check className="size-3 text-pass" /> : <Copy className="size-3 opacity-60" />;
+  if (explorerUrl) {
+    return (
+      <span className={cx("inline-flex items-center gap-1 font-mono text-xs text-ink-2", className)}>
+        <a href={explorerUrl} target="_blank" rel="noopener noreferrer" title={EXPLORER_TOOLTIP} className="tabular text-brand underline-offset-2 hover:underline">
+          {short}
+        </a>
+        <button type="button" onClick={copy} title="Copy" aria-label="Copy hash" className="hover:text-brand">
+          {icon}
+        </button>
+      </span>
+    );
+  }
   return (
     <button
       type="button"
@@ -59,7 +100,7 @@ export function HashText({ value, className, head = 10, tail = 6 }: { value: str
       className={cx("inline-flex items-center gap-1 font-mono text-xs text-ink-2 hover:text-brand", className)}
     >
       <span className="tabular">{short}</span>
-      {copied ? <Check className="size-3 text-pass" /> : <Copy className="size-3 opacity-60" />}
+      {icon}
     </button>
   );
 }

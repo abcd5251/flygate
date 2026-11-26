@@ -2,44 +2,76 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight, CheckCircle2, Lock, ShieldCheck } from "lucide-react";
 import { BoardingPass } from "@/components/BoardingPass";
 import { FlowBand } from "@/components/FlowBand";
 import { Card, HashText, PrimaryButton, SourceTag } from "@/components/ui";
 import { WalletModal } from "@/components/WalletModal";
-import { ADDRESSES, makeTx, shortAddr } from "@/lib/chain";
+import { ADDRESSES, getChain, liveChain, MANDATE_TX_STEPS, shortAddr, type ChainStatus } from "@/lib/chain";
 import { formatExpiry, mandateRules, usd } from "@/lib/mandate";
 import { encryptPassenger, preview, signAsOwner, type SignResult } from "@/lib/pq";
 import { useDemo } from "@/lib/store";
-import type { PassengerInput } from "@/lib/types";
+import type { LiveAddresses, PassengerInput } from "@/lib/types";
 
 export default function MandatePage() {
   const router = useRouter();
-  const { state, update, addTx, wait } = useDemo();
+  const { state, update, addTx, wait, latest } = useDemo();
   const m = state.draft;
   const [walletOpen, setWalletOpen] = useState(false);
   const signRef = useRef<SignResult | null>(null);
   const encRef = useRef<Awaited<ReturnType<typeof encryptPassenger>> | null>(null);
-  const signed = state.signed;
+  // A mandate signed in the other mode has to be signed again in this one (D-25).
+  const signed = state.signed && (state.signed.mode ?? "simulated") === state.mode ? state.signed : undefined;
   const rules = mandateRules(m);
   const p = state.passengerInput;
+  const mode = state.mode;
+  const [live, setLive] = useState<ChainStatus | undefined>();
+  const liveAddrs: LiveAddresses | undefined = mode === "live" ? live?.addresses : undefined;
+
+  // Live: the addresses the server signs with (public data only), for the wallet and the mandate.
+  useEffect(() => {
+    if (mode !== "live") return;
+    let cancelled = false;
+    liveChain.status().then((st) => {
+      if (!cancelled) setLive(st);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode]);
+
+  /** Who signs: the demo constants, or in Live the server's owner account and linked agent key. */
+  function parties() {
+    return latest().mode === "live" && liveAddrs
+      ? { owner: liveAddrs.owner.account.cosmos, agent: liveAddrs.agent.signer }
+      : { owner: ADDRESSES.owner, agent: ADDRESSES.agent };
+  }
 
   function setPassenger(patch: Partial<PassengerInput>) {
     update((s) => ({ ...s, passengerInput: { ...s.passengerInput, ...patch } }));
   }
 
-  const steps = [
-    { label: "Hash the mandate and sign it with ML-DSA-87" },
-    { label: "Encrypt the passport for the merchant (ML-KEM-1024)" },
-    { label: "Link the agent key (auto-expires)" },
-    { label: `Set spending cap: ${m.maxFareUsd} fUSD per ticket` },
-    { label: `Open scoped window: FlightEscrow only, ${m.maxTickets} tx` },
-  ];
+  const steps =
+    mode === "live"
+      ? [
+          { label: "Hash the mandate and sign it with ML-DSA-87" },
+          { label: "Encrypt the passport for the merchant (ML-KEM-1024)" },
+          { label: `Link the agent key + spending cap: ${m.maxFareUsd} fUSD, book() only` },
+          { label: `Open scoped window: FlightEscrow only, ${m.maxTickets} tx` },
+          { label: "Write the mandate to FlightEscrow (setMandate)" },
+        ]
+      : [
+          { label: "Hash the mandate and sign it with ML-DSA-87" },
+          { label: "Encrypt the passport for the merchant (ML-KEM-1024)" },
+          { label: "Link the agent key (auto-expires)" },
+          { label: `Set spending cap: ${m.maxFareUsd} fUSD per ticket` },
+          { label: `Open scoped window: FlightEscrow only, ${m.maxTickets} tx` },
+        ];
 
   async function runStep(i: number) {
     if (i === 0) {
-      const r = await signAsOwner({ mandate: m, owner: ADDRESSES.owner, agent: ADDRESSES.agent });
+      const r = await signAsOwner({ mandate: m, ...parties() });
       signRef.current = r;
       return `${r.sigBytes.toLocaleString()} bytes · ${r.ms} ms · ${r.verified ? "verified" : "failed"}`;
     }
@@ -48,16 +80,15 @@ export default function MandatePage() {
       encRef.current = e;
       return `KEM ${e.kemCiphertextBytes.toLocaleString()} bytes + AES-GCM ${e.aesCiphertextBytes} bytes`;
     }
-    await wait(650);
-    const msgs = [
-      ["Link agent key", "MsgRegisterAuthenticator"],
-      ["Set spending rules", "MsgUpdateSpendingRules"],
-      ["Open scoped window", "MsgOpenEVMWindow"],
-    ] as const;
-    const [label, msg] = msgs[i - 2];
-    const tx = makeTx(label, msg, "owner");
+    const stepMode = latest().mode;
+    // Keep the minimum animation time; a Live tx waits for inclusion on top (D-30).
+    const [tx] = await Promise.all([
+      getChain(stepMode).setupMandate({ step: MANDATE_TX_STEPS[stepMode][i - 2], mandate: m, mandateHash: signRef.current?.hash }),
+      wait(650),
+    ]);
+    if (!tx.ok) throw new Error(`${tx.code ?? "failed"}${tx.reason ? ` · ${tx.reason}` : ""}`);
     addTx(tx);
-    return `${msg} · ${tx.hash.slice(0, 14)}…`;
+    return `${tx.msg} · ${tx.hash.slice(0, 14)}…`;
   }
 
   function onSigned() {
@@ -73,7 +104,8 @@ export default function MandatePage() {
         sigPreview: preview(r.sig),
         signMs: r.ms,
         signedAt: Date.now(),
-        agentAddress: ADDRESSES.agent,
+        agentAddress: parties().agent,
+        mode: s.mode,
       },
       passenger: {
         displayName: `${s.passengerInput.surname} / ${s.passengerInput.givenName}`,
@@ -142,7 +174,7 @@ export default function MandatePage() {
                   <p className="text-xs text-muted">Sent to merchant as</p>
                   <p className="font-mono text-xs break-all text-ink-2">0x{state.passenger.preview}…</p>
                   <p className="mt-1 flex items-center gap-2 text-xs text-muted">
-                    ML-KEM-1024 ciphertext <SourceTag real />
+                    ML-KEM-1024 ciphertext <SourceTag kind="crypto" />
                   </p>
                 </div>
               </div>
@@ -179,7 +211,10 @@ export default function MandatePage() {
                   {ownerTxs.map((t) => (
                     <li key={t.id} className="flex items-center justify-between gap-2 text-sm">
                       <span className="text-ink">{t.label}</span>
-                      <HashText value={t.hash} head={8} tail={4} />
+                      <span className="flex items-center gap-2">
+                        {t.source === "live" && t.ok && <SourceTag kind="live-tx" />}
+                        <HashText value={t.hash} head={8} tail={4} explorerUrl={t.explorerUrl} />
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -221,12 +256,21 @@ export default function MandatePage() {
             { k: "Route", v: `${m.origin.city} → ${m.destination.city}` },
             { k: "Max fare", v: usd(m.maxFareUsd) },
             { k: "Expires", v: formatExpiry(m.expiresAt) },
-            { k: "Agent", v: shortAddr(ADDRESSES.agent, 9, 4) },
+            { k: "Agent", v: shortAddr(liveAddrs?.agent.signer ?? ADDRESSES.agent, 9, 4) },
           ]}
+          signer={mode === "live" ? "server" : "simulated"}
+          accounts={
+            liveAddrs && [
+              { k: "Pays from", v: `owner account ${shortAddr(liveAddrs.owner.account.cosmos, 8, 4)} / ${shortAddr(liveAddrs.owner.account.evm, 6, 4)}` },
+              { k: "Refunds to", v: `owner EVM address ${shortAddr(liveAddrs.owner.signer, 6, 4)}` },
+            ]
+          }
           steps={steps}
           runStep={runStep}
           onDone={onSigned}
           onClose={() => setWalletOpen(false)}
+          fallbackLabel={mode === "live" ? "Sign in Simulated mode instead" : undefined}
+          onFallback={() => update((s) => ({ ...s, mode: "simulated" }))}
         />
       )}
     </>

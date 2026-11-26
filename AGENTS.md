@@ -22,6 +22,6 @@ Uses the five default triage labels (needs-triage, needs-info, ready-for-agent, 
 
 Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
-## Worktrees
+### Coding standards
 
-Several agent sessions share this repo at once, each with its own git worktrees (under `.claude/worktrees/`, a session scratchpad, or elsewhere). Only remove, prune, or clean up worktrees and their branches that your own session created. Never run `git worktree remove`, `git worktree prune`, or delete a worktree directory you did not create, even if it looks stale, finished, or unlocked — another session may still be working in it. If a foreign worktree is in your way, leave it and ask the user.
+Review rules live in `CODING_STANDARDS.md`.

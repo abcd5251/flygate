@@ -78,6 +78,12 @@ export type GateVerdict = {
 
 export type TxKind = "owner" | "agent" | "merchant" | "contract" | "attacker";
 
+/** Where a chain result came from: a simulated stand-in, or the diana testnet. */
+export type TxSource = "simulated" | "live";
+
+/** Which transaction format carried a live tx: a Cosmos tx (Cosmos hash) or a plain EVM tx (0x hash). */
+export type TxLane = "cosmos" | "evm";
+
 export type ChainTx = {
   id: string;
   label: string;
@@ -86,7 +92,12 @@ export type ChainTx = {
   kind: TxKind;
   ok: boolean;
   code?: string;
+  /** Why a live tx failed (or was refused before sending), for the presenter. */
+  reason?: string;
   at: number;
+  source: TxSource;
+  explorerUrl?: string;
+  lane?: TxLane;
 };
 
 export type SignedMandate = {
@@ -97,6 +108,8 @@ export type SignedMandate = {
   signMs: number;
   signedAt: number;
   agentAddress: string;
+  /** The mode it was signed in: a simulated mandate never drives live txs (D-25). */
+  mode: DemoMode;
 };
 
 export type StepStatus = "pending" | "running" | "done" | "failed" | "skipped";
@@ -118,6 +131,14 @@ export type BookingStep = {
   detail?: string;
   hash?: string;
   at?: number;
+  source?: TxSource;
+  explorerUrl?: string;
+  /** Result of a read-only chain query (eth_call / REST), shown as "Live read". */
+  readResult?: string;
+  /** Overrides the step's default call text (e.g. "agent EOA → FlightEscrow.book()"). */
+  msg?: string;
+  /** Overrides the step's default actor (e.g. the merchant-signed proof in Live, D-19). */
+  actor?: "merchant" | "chain" | "agent" | "gate";
 };
 
 export type BookingStatus = "running" | "succeeded" | "refunded" | "blocked";
@@ -132,6 +153,17 @@ export type Booking = {
   quoteSigPreview?: string;
   proofSigPreview?: string;
   scenario: Scenario;
+  /** Names the signed quote for the verify step. */
+  quoteId?: string;
+  /** Live: the on-chain bookingId, fixed by the quote before book() is sent (D-28). */
+  bookingId?: string;
+  /** Live: the quoted price in QOR on diana ("3.89"), shown next to the US$ price (D-14). */
+  priceQor?: string;
+  /**
+   * A Live step failed and the presenter chose "Finish in Simulated mode" (D-26): which step and
+   * its error. Steps after it ran simulated; steps already on-chain keep "Live tx".
+   */
+  fallback?: { step: BookingStepKey; detail?: string };
 };
 
 export type FeedItem = {
@@ -167,3 +199,13 @@ export type AttackKey = "overspend" | "drain" | "replay" | "expired" | "qday" | 
 export type AttackState = "idle" | "running" | "blocked";
 
 export type Scenario = "normal" | "price_change" | "order_fail";
+
+/** Whether on-chain steps are simulated in the browser or sent to diana by the server. */
+export type DemoMode = "simulated" | "live";
+
+/** Public addresses the Live server signs with (D-27). Never key material. */
+export type LiveAddresses = {
+  owner: { account: { cosmos: string; evm: string }; signer: string };
+  agent: { account: { cosmos: string; evm: string }; signer: string };
+  merchant: { account: { cosmos: string; evm: string } };
+};

@@ -7,11 +7,16 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "next typegen && tsc --noEmit",
+    "check:bundle": "next build && tsx scripts/check-bundle.ts",
     "bootstrap": "tsx scripts/bootstrap/index.ts",
     "evm:check": "tsx scripts/evm/check.ts",
     "escrow:deploy": "tsx scripts/escrow/deploy.ts",
     "escrow:e2e": "tsx scripts/escrow/e2e.ts",
+    "live:probe": "forge build && tsx scripts/live/probe.ts",
+    "live:sweep": "tsx scripts/live/sweep.ts",
     "test:scripts": "tsx --test 'scripts/**/*.test.ts'",
+    "test:live": "tsx --conditions=react-server --test 'src/server/**/*.test.ts'",
     "test:contracts": "forge test"
   },
   "dependencies": {
@@ -21,6 +26,7 @@
     "next": "16.4.6",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "server-only": "^0.0.1",
     "viem": "^2.58.6"
   },
   "devDependencies": {

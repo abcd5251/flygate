@@ -8,25 +8,61 @@ import { AirlineBadge } from "@/components/FlightCard";
 import { EmptyState, FlowBand } from "@/components/FlowBand";
 import { Card, cx, GhostButton, HashText, Pill, PrimaryButton, SourceTag, Spinner } from "@/components/ui";
 import { newBooking, STEP_META } from "@/lib/booking";
-import { ADDRESSES, explorerAddressUrl, fakeHash, fakePnr, makeTx, shortAddr } from "@/lib/chain";
+import { ADDRESSES, explorerAddressUrl, fakeHash, fakePnr, getChain, liveChain, shortAddr, type ChainStatus } from "@/lib/chain";
 import { checkOffer, rankOffers } from "@/lib/gate";
 import { formatDateLong, usd } from "@/lib/mandate";
-import { DEMO_OFFERS, formatDuration, PRICE_CHANGE_USD } from "@/lib/offers";
-import { pqcVerifyMerchant, preview, signAsMerchant } from "@/lib/pq";
+import { DEMO_OFFERS, formatDuration } from "@/lib/offers";
 import { useDemo } from "@/lib/store";
-import type { Booking, BookingStep, BookingStepKey } from "@/lib/types";
+import type { Booking, BookingStep, BookingStepKey, ChainTx } from "@/lib/types";
 
 const ACTOR_LABEL = { merchant: "Merchant", chain: "Chain", agent: "Agent", gate: "Gate" } as const;
 const ACTOR_TONE = { merchant: "muted", chain: "pq", agent: "brand", gate: "pass" } as const;
 const REAL_CRYPTO: BookingStepKey[] = ["quote", "verify", "proof"];
+/** Live steps that broadcast: after a reload they are looked up on-chain, never just resent (D-28). */
+const RECOVERABLE: BookingStepKey[] = ["lock", "proof", "refund"];
+
+/**
+ * A failed step that stops the run. The order step's Duffel failure is the Booking fails
+ * scenario, not a failure of the run: the refund step follows it.
+ */
+const stopsRun = (st: BookingStep) => st.status === "failed" && st.key !== "order";
+
+/** The step fields that come from a chain tx: its hash, where it came from and its explorer link. */
+function txStep(tx: ChainTx): Pick<BookingStep, "hash" | "source" | "explorerUrl"> {
+  return { hash: tx.hash, source: tx.source, explorerUrl: tx.explorerUrl };
+}
+
+/**
+ * A live tx that failed or was refused: the step fails with the chain's error code and no hash,
+ * so it never shows "Live tx" (D-20).
+ */
+function failedTx(tx: ChainTx): Partial<BookingStep> {
+  return { status: "failed", detail: `${tx.code ?? "failed"}${tx.reason ? ` · ${tx.reason}` : ""}`, hash: undefined, source: tx.source, at: Date.now() };
+}
 
 export default function CheckoutPage() {
   const router = useRouter();
   const { state, ready, update, wait, latest, addTx } = useDemo();
   const booking = state.booking;
   const offer = DEMO_OFFERS.find((o) => o.id === booking?.offerId);
-  const quoteRef = useRef<{ payload: unknown; sig: Uint8Array } | null>(null);
+  const releaseRef = useRef<ChainTx | null>(null);
   const [stay, setStay] = useState(false);
+  const [live, setLive] = useState<ChainStatus | undefined>();
+  const liveRef = useRef<ChainStatus | undefined>(undefined);
+  const escrowAddr = state.mode === "live" ? live?.escrow : ADDRESSES.escrow;
+
+  // Live: the deployed FlightEscrow address for the sidebar (public data only).
+  useEffect(() => {
+    if (state.mode !== "live") return;
+    let cancelled = false;
+    liveChain.status().then((st) => {
+      liveRef.current = st;
+      if (!cancelled) setLive(st);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [state.mode]);
 
   function patchBooking(fn: (b: Booking) => Booking) {
     update((s) => (s.booking ? { ...s, booking: fn(s.booking) } : s));
@@ -35,27 +71,95 @@ export default function CheckoutPage() {
     patchBooking((b) => ({ ...b, steps: b.steps.map((st) => (st.key === key ? { ...st, ...patch } : st)) }));
   }
 
-  useEffect(() => {
-    if (!ready || !booking || booking.status !== "running" || !offer) return;
-    let cancelled = false;
+  // A mandate signed in the other mode never drives this mode's chain steps (D-25).
+  // A booking finishing in Simulated mode after a Live failure is not a mismatch (D-26).
+  const modeMismatch = !!state.signed && (state.signed.mode ?? "simulated") !== state.mode && !booking?.fallback;
 
-    async function quotePayload() {
+  useEffect(() => {
+    if (!ready || !booking || booking.status !== "running" || !offer || modeMismatch) return;
+    let cancelled = false;
+    const chain = getChain(latest().mode);
+
+    function quoteInput() {
+      const s = latest();
+      return { offerId: offer!.id, scenario: s.booking!.scenario, mandate: s.draft, mandateHash: s.signed?.hash };
+    }
+
+    /** The refund step is done: the booking ends refunded and the budget gives the fare back. */
+    function refunded(amount: number, patch: Partial<BookingStep>) {
+      update((st) => ({
+        ...st,
+        scenario: "normal",
+        spentUsd: Math.max(0, st.spentUsd - amount),
+        refundedUsd: st.refundedUsd + amount,
+        booking: st.booking
+          ? { ...st.booking, status: "refunded", steps: st.booking.steps.map((x) => (x.key === "refund" ? { ...x, ...patch } : x)) }
+          : st.booking,
+      }));
+    }
+
+    /**
+     * After a reload, a Live step left "running" may already be on-chain: ask diana where the
+     * booking stands (Booked / Released / Refunded events) instead of sending it again (D-28).
+     * `undefined` runs the step as usual; the server's idempotency table answers a repeat of a
+     * tx it already sent without broadcasting it again.
+     */
+    async function recover(key: BookingStepKey): Promise<"next" | "stop" | undefined> {
       const s = latest();
       const b = s.booking!;
-      const price = b.scenario === "price_change" ? PRICE_CHANGE_USD : offer!.priceUsd;
-      const payload = {
-        offerId: offer!.id,
-        flight: offer!.flightNo,
-        route: `${offer!.from}-${offer!.to}`,
-        date: offer!.date,
-        priceUsd: price,
-        escrow: ADDRESSES.escrow,
-        mandateHash: s.signed?.hash,
-        validUntil: Date.now() + 20 * 60_000,
-      };
-      const r = await signAsMerchant(payload);
-      quoteRef.current = { payload, sig: r.sig };
-      return { price, r };
+      if (s.mode !== "live" || !b.bookingId || !RECOVERABLE.includes(key)) return undefined;
+      const r = await chain.bookingState({ bookingId: b.bookingId });
+      if (cancelled) return "stop";
+      if (!r.ok) {
+        setStep(key, { status: "failed", detail: `${r.code} · ${r.reason} · checked after a reload; nothing was sent again`, source: "live", at: Date.now() });
+        return "stop";
+      }
+      const found = (label: string, msg: string, ref: { hash: string; explorerUrl: string }): ChainTx => ({
+        id: `live_${Date.now()}_${key}`,
+        label,
+        msg,
+        hash: ref.hash,
+        kind: key === "lock" ? "agent" : "merchant",
+        ok: true,
+        at: Date.now(),
+        source: "live",
+        explorerUrl: ref.explorerUrl,
+        lane: "evm",
+      });
+      if (key === "lock" && r.booked) {
+        const amount = b.quotedPriceUsd ?? b.priceUsd;
+        addTx(found(`Escrow ${usd(amount)}`, "FlightEscrow.book()", r.booked));
+        update((st) => ({ ...st, spentUsd: st.spentUsd + amount }));
+        const escrow = liveRef.current?.escrow ?? "FlightEscrow";
+        setStep(key, { status: "done", detail: `${b.priceQor ?? "?"} QOR → ${shortAddr(escrow, 8, 4)} · found on-chain after a reload (Booked event)`, hash: r.booked.hash, explorerUrl: r.booked.explorerUrl, source: "live", at: Date.now() });
+        return "next";
+      }
+      if (key === "proof" && r.state === "Released" && r.released) {
+        addTx(found("Ticket proof on-chain", "FlightEscrow.confirmTicket()", r.released));
+        setStep(key, {
+          status: "done",
+          detail: "Verified on-chain by confirmTicket() · found after a reload (Released event)",
+          actor: "merchant",
+          msg: "FlightEscrow.confirmTicket()",
+          hash: r.released.hash,
+          explorerUrl: r.released.explorerUrl,
+          source: "live",
+          at: Date.now(),
+        });
+        return "next";
+      }
+      if (key === "refund" && r.state === "Refunded" && r.refunded) {
+        const amount = b.quotedPriceUsd ?? b.priceUsd;
+        addTx(found(`Refund ${usd(amount)}`, "Refunded · FlightEscrow.cancel()", r.refunded));
+        const detail = `${b.priceQor ?? "?"} QOR back to your refund address · found on-chain after a reload (Refunded event)`;
+        refunded(amount, { status: "done", detail, actor: "merchant", msg: "Refunded · FlightEscrow.cancel()", hash: r.refunded.hash, explorerUrl: r.refunded.explorerUrl, source: "live", at: Date.now() });
+        return "stop";
+      }
+      if (key === "proof" && r.state === "Refunded") {
+        setStep(key, { status: "failed", detail: "Booking already refunded on-chain (Refunded event); nothing was sent", actor: "merchant", source: "live", at: Date.now() });
+        return "stop";
+      }
+      return undefined;
     }
 
     async function run(key: BookingStepKey): Promise<"next" | "stop"> {
@@ -63,28 +167,42 @@ export default function CheckoutPage() {
       const b = s.booking!;
       const m = s.draft;
       setStep(key, { status: "running" });
-      await wait(key === "order" ? 1500 : 1000);
+      // The minimum animation time; a Live step then also waits for the chain (D-30).
+      await wait(key === "order" ? 1500 : key === "refund" ? 1200 : 1000);
       if (cancelled) return "stop";
 
       switch (key) {
         case "quote": {
-          const { price, r } = await quotePayload();
-          patchBooking((bk) => ({ ...bk, quotedPriceUsd: price, quoteSigPreview: preview(r.sig) }));
-          setStep(key, { status: "done", detail: `Quote ${usd(price)} · signature ${r.sigBytes.toLocaleString()} bytes`, at: Date.now() });
+          const q = await chain.signQuote(quoteInput());
+          if (cancelled) return "stop";
+          if (!q.ok) {
+            setStep(key, { status: "failed", detail: `${q.code} · ${q.reason}`, at: Date.now() });
+            return "stop";
+          }
+          patchBooking((bk) => ({ ...bk, quotedPriceUsd: q.priceUsd, quoteSigPreview: q.sigPreview, quoteId: q.quoteId, bookingId: q.bookingId, priceQor: q.priceQor }));
+          const onChain = q.priceQor ? ` (≈ ${q.priceQor} QOR on diana)` : "";
+          setStep(key, { status: "done", detail: `Quote ${usd(q.priceUsd)}${onChain} · signature ${q.sigBytes.toLocaleString()} bytes`, at: Date.now() });
           return "next";
         }
         case "verify": {
-          if (!quoteRef.current) await quotePayload();
-          const ok = await pqcVerifyMerchant(quoteRef.current!.payload, quoteRef.current!.sig);
-          setStep(key, { status: ok ? "done" : "failed", detail: `pqcVerify(merchant key, quote, signature) → ${ok}`, at: Date.now() });
-          return ok ? "next" : "stop";
+          const v = await chain.verifyQuote({ ...quoteInput(), quoteId: latest().booking?.quoteId });
+          if (cancelled) return "stop";
+          setStep(key, { status: v.ok ? "done" : "failed", detail: v.code && !v.ok ? `${v.code} · ${v.detail}` : v.detail, source: v.source === "live" ? "live" : undefined, readResult: v.readResult, at: Date.now() });
+          return v.ok ? "next" : "stop";
         }
         case "rules": {
           const price = b.quotedPriceUsd ?? offer!.priceUsd;
           const v = checkOffer(offer!, m, price);
           if (!v.ok) {
-            setStep(key, { status: "failed", detail: `${v.firstFail?.detail}. The agent stopped before paying.`, at: Date.now() });
-            addTx(makeTx("Backup on-chain check: overspend rejected", "perTxLimit", "agent", false, "abstractaccount 5"));
+            const stopped = `${v.firstFail?.detail}. The agent stopped before paying.`;
+            setStep(key, { status: "failed", detail: stopped, at: Date.now() });
+            const cap = await chain.checkFareCap({ offerId: offer!.id, priceUsd: price, maxFareUsd: m.maxFareUsd, bookingId: b.bookingId });
+            if (cap.tx) addTx(cap.tx);
+            // Live: the contract's own refusal, read with eth_call; no tx, no hash (D-17).
+            if (cap.source === "live") {
+              const onChain = cap.readResult ?? `On-chain check failed: ${cap.code ?? "error"} · ${cap.detail ?? ""}`;
+              setStep(key, { source: "live", readResult: cap.readResult, detail: `${stopped} ${onChain}` });
+            }
             update((st) => ({ ...st, scenario: "normal", booking: st.booking ? { ...st.booking, status: "blocked" } : st.booking }));
             return "stop";
           }
@@ -92,40 +210,54 @@ export default function CheckoutPage() {
           return "next";
         }
         case "lock": {
-          const tx = makeTx(`Escrow ${usd(b.quotedPriceUsd ?? b.priceUsd)}`, "MsgExecuteEVM", "agent");
+          const tx = await chain.lockFunds({ offerId: offer!.id, amountUsd: b.quotedPriceUsd ?? b.priceUsd, bookingId: b.bookingId });
+          if (tx.source === "live") {
+            if (!tx.ok) {
+              setStep(key, failedTx(tx));
+              return "stop";
+            }
+            addTx(tx);
+            update((st) => ({ ...st, spentUsd: st.spentUsd + (b.quotedPriceUsd ?? b.priceUsd) }));
+            const escrow = liveRef.current?.escrow ?? "FlightEscrow";
+            const payer = tx.msg.startsWith("agent EOA") ? "the agent EOA" : "your account";
+            setStep(key, { status: "done", detail: `${b.priceQor ?? "?"} QOR from ${payer} → ${shortAddr(escrow, 8, 4)}`, msg: tx.msg, ...txStep(tx), at: Date.now() });
+            return "next";
+          }
           addTx(tx);
           update((st) => ({ ...st, spentUsd: st.spentUsd + (b.quotedPriceUsd ?? b.priceUsd) }));
-          setStep(key, { status: "done", detail: `${b.quotedPriceUsd ?? b.priceUsd} fUSD → ${shortAddr(ADDRESSES.escrow, 8, 4)}`, hash: tx.hash, at: Date.now() });
+          setStep(key, { status: "done", detail: `${b.quotedPriceUsd ?? b.priceUsd} fUSD → ${shortAddr(ADDRESSES.escrow, 8, 4)}`, ...txStep(tx), at: Date.now() });
           return "next";
         }
         case "order": {
           if (b.scenario === "order_fail") {
+            // The refund runs as its own step, so a reload or "Finish in Simulated mode" can resume it.
             setStep(key, { status: "failed", detail: "Duffel: offer_no_longer_available (sold out)", at: Date.now() });
-            patchBooking((bk) => ({ ...bk, steps: [...bk.steps.filter((st) => st.status !== "pending"), { key: "refund", status: "running" }] }));
-            await wait(1200);
-            if (cancelled) return "stop";
-            const amount = b.quotedPriceUsd ?? b.priceUsd;
-            const tx = makeTx(`Refund ${usd(amount)}`, STEP_META.refund.msg!, "contract");
-            addTx(tx);
-            update((st) => ({
-              ...st,
-              scenario: "normal",
-              spentUsd: Math.max(0, st.spentUsd - amount),
-              refundedUsd: st.refundedUsd + amount,
-              booking: st.booking
-                ? {
-                    ...st.booking,
-                    status: "refunded",
-                    steps: st.booking.steps.map((x) =>
-                      x.key === "refund" ? { ...x, status: "done", detail: `${amount} fUSD back to ${shortAddr(ADDRESSES.owner, 8, 4)}`, hash: tx.hash, at: Date.now() } : x,
-                    ),
-                  }
-                : st.booking,
-            }));
-            return "stop";
+            patchBooking((bk) => ({ ...bk, steps: [...bk.steps.filter((st) => st.status !== "pending"), { key: "refund", status: "pending" }] }));
+            return "next";
           }
           setStep(key, { status: "done", detail: `Duffel order ord_${fakeHash().slice(2, 14)} created (test mode)`, at: Date.now() });
           return "next";
+        }
+        case "refund": {
+          const amount = b.quotedPriceUsd ?? b.priceUsd;
+          const r = await chain.cancelBooking({ offerId: offer!.id, amountUsd: amount, bookingId: b.bookingId });
+          if (cancelled) return "stop";
+          const tx = r.tx;
+          if (tx.source === "live" && !tx.ok) {
+            // The fare stays locked; the failure callout shows the bookingId and when it refunds (D-26).
+            setStep(key, { ...failedTx(tx), actor: "merchant" });
+            return "stop";
+          }
+          addTx(tx);
+          // Live: the merchant signed the CancelProof, the agent EOA submitted cancel() (D-19),
+          // then one balance read of the refund address shows the money is back (D-18, D-10).
+          const detail =
+            tx.source === "live"
+              ? `${b.priceQor ?? "?"} QOR back to your refund address ${shortAddr(r.refundTo ?? "", 8, 4)} · submitted by agent · ${r.balanceQor ? `balance now ${r.balanceQor}` : (r.readError ?? "balance not read")}`
+              : `${amount} fUSD back to ${shortAddr(ADDRESSES.owner, 8, 4)}`;
+          const liveFields: Partial<BookingStep> = tx.source === "live" ? { actor: "merchant", msg: "Refunded · FlightEscrow.cancel()", readResult: r.readResult } : {};
+          refunded(amount, { status: "done", detail, ...liveFields, ...txStep(tx), at: Date.now() });
+          return "stop";
         }
         case "ticket": {
           const pnr = fakePnr();
@@ -135,18 +267,41 @@ export default function CheckoutPage() {
         }
         case "proof": {
           const pnr = latest().booking?.pnr ?? "";
-          const payload = { pnr, offerId: offer!.id, escrow: ADDRESSES.escrow, issuedAt: Date.now() };
-          const r = await signAsMerchant(payload);
-          const ok = await pqcVerifyMerchant(payload, r.sig);
-          const tx = makeTx("Ticket proof on-chain", "FlightEscrow.confirmTicket()", "merchant");
+          const r = await chain.confirmTicket({ offerId: offer!.id, amountUsd: b.quotedPriceUsd ?? b.priceUsd, bookingId: b.bookingId, pnr });
+          const tx = r.proof;
+          if (tx.source === "live") {
+            // The merchant signs the TicketProof; the agent's EOA only submits it (D-19).
+            if (!tx.ok) {
+              setStep(key, { ...failedTx(tx), actor: "merchant" });
+              return "stop";
+            }
+            releaseRef.current = r.release;
+            addTx(tx);
+            patchBooking((bk) => ({ ...bk, proofSigPreview: r.sigPreview }));
+            setStep(key, {
+              status: "done",
+              detail: `ML-DSA-87 signature ${r.sigBytes?.toLocaleString() ?? "?"} bytes · verified on-chain by confirmTicket() · submitted by agent`,
+              actor: "merchant",
+              msg: "FlightEscrow.confirmTicket()",
+              ...txStep(tx),
+              at: Date.now(),
+            });
+            return "next";
+          }
+          releaseRef.current = r.release;
           addTx(tx);
-          patchBooking((bk) => ({ ...bk, proofSigPreview: preview(r.sig) }));
-          setStep(key, { status: ok ? "done" : "failed", detail: `ML-DSA-87 signature ${r.sigBytes.toLocaleString()} bytes · pqcVerify → ${ok}`, hash: tx.hash, at: Date.now() });
-          return ok ? "next" : "stop";
+          patchBooking((bk) => ({ ...bk, proofSigPreview: r.sigPreview }));
+          setStep(key, { status: r.verified ? "done" : "failed", detail: `ML-DSA-87 signature ${r.sigBytes?.toLocaleString()} bytes · pqcVerify → ${r.verified}`, ...txStep(tx), at: Date.now() });
+          return r.verified ? "next" : "stop";
         }
         case "release": {
-          const tx = makeTx("Payout to merchant", STEP_META.release.msg!, "contract");
-          addTx(tx);
+          // The payout is the `Released` event of the confirmTicket() tx sent in the proof step.
+          const tx = releaseRef.current;
+          releaseRef.current = null;
+          const proofStep = latest().booking?.steps.find((x) => x.key === "proof");
+          if (tx && tx.hash !== proofStep?.hash) addTx(tx);
+          // After a reload the ref is gone; fall back to the proof tx, which carries the event.
+          const shown = tx ?? proofStep;
           update((st) => ({
             ...st,
             booking: st.booking
@@ -154,7 +309,20 @@ export default function CheckoutPage() {
                   ...st.booking,
                   status: "succeeded",
                   steps: st.booking.steps.map((x) =>
-                    x.key === "release" ? { ...x, status: "done", detail: `${b.quotedPriceUsd ?? b.priceUsd} fUSD → ${shortAddr(ADDRESSES.merchant, 8, 4)}`, hash: tx.hash, at: Date.now() } : x,
+                    x.key === "release"
+                      ? {
+                          ...x,
+                          status: "done",
+                          detail:
+                            shown?.source === "live"
+                              ? `${b.priceQor ?? "?"} QOR → merchant ${shortAddr(liveRef.current?.addresses?.merchant.account.evm ?? "", 8, 4)} · same tx as the ticket proof`
+                              : `${b.quotedPriceUsd ?? b.priceUsd} fUSD → ${shortAddr(ADDRESSES.merchant, 8, 4)}`,
+                          hash: shown?.hash,
+                          source: shown?.source,
+                          explorerUrl: shown?.explorerUrl,
+                          at: Date.now(),
+                        }
+                      : x,
                   ),
                 }
               : st.booking,
@@ -171,9 +339,14 @@ export default function CheckoutPage() {
       while (!cancelled) {
         const b = latest().booking;
         if (!b || b.status !== "running") return;
+        // A failed step ends the run; nothing after it runs (also after a reload).
+        if (b.steps.some(stopsRun)) return;
         const next = b.steps.find((st) => st.status === "pending" || st.status === "running");
         if (!next) return;
-        const result = await run(next.key);
+        // Only a step left over from before a reload is "running" here.
+        const recovered = next.status === "running" ? await recover(next.key) : undefined;
+        if (cancelled) return;
+        const result = recovered ?? (await run(next.key));
         if (result === "stop") return;
       }
     })();
@@ -181,9 +354,9 @@ export default function CheckoutPage() {
     return () => {
       cancelled = true;
     };
-    // Restart the runner only when a different booking starts.
+    // Restart the runner only when a different booking starts, or it finishes in Simulated mode.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, booking?.offerId, booking?.status === "running"]);
+  }, [ready, booking?.offerId, booking?.status === "running", modeMismatch, state.mode]);
 
   useEffect(() => {
     if (booking?.status !== "succeeded" || stay) return;
@@ -192,6 +365,20 @@ export default function CheckoutPage() {
   }, [booking?.status, stay, router]);
 
   if (!ready) return null;
+  if (modeMismatch) {
+    const label = state.mode === "live" ? "Live" : "Simulated";
+    return (
+      <>
+        <FlowBand current={3} title="Gate check" />
+        <EmptyState
+          title={`Re-sign your mandate in ${label} mode`}
+          body={`Your mandate was signed in ${state.mode === "live" ? "Simulated" : "Live"} mode. Sign it again before the agent books in ${label} mode.`}
+          href="/mandate"
+          cta="Sign the mandate again"
+        />
+      </>
+    );
+  }
   if (!booking || !offer || !state.signed) {
     return (
       <>
@@ -205,6 +392,30 @@ export default function CheckoutPage() {
   const price = booking.quotedPriceUsd ?? booking.priceUsd;
   const alternative = rankOffers(DEMO_OFFERS, m).passed.find((o) => o.id !== offer.id);
   const locked = booking.steps.find((s) => s.key === "lock")?.status === "done";
+  const liveDone = (key: BookingStepKey) => booking.steps.some((s) => s.key === key && s.status === "done" && s.source === "live" && !!s.hash);
+  // A Live step failed (timeout, RPC error, revert): no silent fallback, the presenter decides (D-26).
+  // The order step's Duffel failure is a scenario, not a Live failure.
+  const liveFailed = state.mode === "live" && booking.status === "running" ? booking.steps.find(stopsRun) : undefined;
+  // book() succeeded on diana but neither payout nor refund did: the QOR waits in FlightEscrow.
+  const stuckInEscrow = liveDone("lock") && !liveDone("proof") && !liveDone("refund") && (!!liveFailed || !!booking.fallback);
+
+  /** Switch to Simulated and run on from the failed step; steps already on-chain keep "Live tx". */
+  function finishSimulated() {
+    update((s) => {
+      const b = s.booking;
+      const failed = b?.steps.find(stopsRun);
+      if (!b || !failed) return s;
+      return {
+        ...s,
+        mode: "simulated",
+        booking: {
+          ...b,
+          fallback: { step: failed.key, detail: failed.detail },
+          steps: b.steps.map((st) => (st.key === failed.key ? { key: st.key, status: "pending" } : st)),
+        },
+      };
+    });
+  }
 
   function retryWith(o: typeof offer) {
     if (!o) return;
@@ -237,6 +448,25 @@ export default function CheckoutPage() {
               </div>
             </Callout>
           )}
+          {liveFailed && (
+            <Callout tone="warn" icon={<AlertTriangle className="size-6" />} title={`Live step failed: ${STEP_META[liveFailed.key].title}`}>
+              <p>
+                {liveFailed.detail ?? "failed"}. Nothing was sent again and nothing switched to Simulated on its own.
+              </p>
+              {stuckInEscrow && <EscrowNotice bookingId={booking.bookingId} />}
+              <div className="mt-4 flex flex-wrap gap-3">
+                <PrimaryButton onClick={finishSimulated}>Finish in Simulated mode</PrimaryButton>
+              </div>
+            </Callout>
+          )}
+          {booking.fallback && (
+            <Callout tone="warn" icon={<AlertTriangle className="size-6" />} title="Finished in Simulated mode">
+              <p>
+                {STEP_META[booking.fallback.step].title} failed on diana{booking.fallback.detail ? ` (${booking.fallback.detail})` : ""}. From that step on, steps are simulated; steps tagged “Live tx” are on-chain.
+              </p>
+              {stuckInEscrow && <EscrowNotice bookingId={booking.bookingId} />}
+            </Callout>
+          )}
           {booking.status === "refunded" && (
             <Callout tone="warn" icon={<RotateCcw className="size-6" />} title={`Booking failed. ${usd(price)} refunded.`}>
               <p>No ticket, no payout. The contract refunded you automatically.</p>
@@ -262,6 +492,10 @@ export default function CheckoutPage() {
             <ol className="relative space-y-0">
               {booking.steps.map((st, i) => {
                 const meta = STEP_META[st.key];
+                const actor = st.actor ?? meta.actor;
+                const msg = st.msg ?? meta.msg;
+                // Live verify is the pqcVerify eth_call on diana, not browser crypto.
+                const realCrypto = REAL_CRYPTO.includes(st.key) && !(st.key === "verify" && st.source === "live");
                 const last = i === booking.steps.length - 1;
                 return (
                   <li key={st.key} className="relative flex gap-4 pb-6 last:pb-0">
@@ -270,19 +504,18 @@ export default function CheckoutPage() {
                     <div className="min-w-0 flex-1 pt-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <p className={cx("font-bold", st.status === "pending" ? "text-muted" : st.status === "failed" ? "text-block" : "text-ink")}>{meta.title}</p>
-                        <Pill tone={ACTOR_TONE[meta.actor]}>{ACTOR_LABEL[meta.actor]}</Pill>
-                        {st.status === "done" && REAL_CRYPTO.includes(st.key) && <SourceTag real />}
+                        <Pill tone={ACTOR_TONE[actor]}>{msg?.startsWith("agent EOA") ? "Agent EOA" : ACTOR_LABEL[actor]}</Pill>
+                        {st.status === "done" && realCrypto && <SourceTag kind="crypto" />}
+                        {st.source === "live" && (st.status === "done" || (st.status === "failed" && st.readResult && !st.hash)) && <SourceTag kind={st.hash ? "live-tx" : "live-read"} />}
+                        {st.status === "done" && st.source === "live" && st.hash && st.readResult && <SourceTag kind="live-read" />}
+                        {/* A booking that mixes both: say which txs were simulated (D-26). */}
+                        {st.status === "done" && booking.fallback && st.source === "simulated" && st.hash && <SourceTag kind="simulated" />}
                       </div>
-                      {meta.msg && <p className="font-mono text-xs text-muted">{meta.msg}</p>}
+                      {msg && <p className="font-mono text-xs text-muted">{msg}</p>}
                       {st.detail && <p className={cx("mt-1 text-sm", st.status === "failed" ? "text-block" : "text-ink-2")}>{st.detail}</p>}
                     </div>
                     <div className="hidden shrink-0 pt-1 text-right sm:block">
-                      {st.hash && (
-                        <div className="flex items-center justify-end gap-2">
-                          <HashText value={st.hash} head={8} tail={4} />
-                          <SourceTag real={false} />
-                        </div>
-                      )}
+                      {st.hash && <HashText value={st.hash} head={8} tail={4} explorerUrl={st.explorerUrl} />}
                       {st.at && <p className="tabular text-[11px] text-muted">{new Date(st.at).toLocaleTimeString("zh-TW", { hour12: false })}</p>}
                     </div>
                   </li>
@@ -317,7 +550,10 @@ export default function CheckoutPage() {
             </div>
             <div className="mt-4 flex items-center justify-between border-t border-line pt-4">
               <span className="text-sm text-ink-2">{state.passenger?.displayName ?? "Traveler"}</span>
-              <span className={cx("tabular text-2xl font-bold", price > m.maxFareUsd ? "text-block" : "text-brand")}>{usd(price)}</span>
+              <span className="text-right">
+                <span className={cx("tabular block text-2xl font-bold", price > m.maxFareUsd ? "text-block" : "text-brand")}>{usd(price)}</span>
+                {booking.priceQor && <span className="tabular block text-xs text-muted">≈ {booking.priceQor} QOR on diana</span>}
+              </span>
             </div>
           </Card>
 
@@ -332,23 +568,33 @@ export default function CheckoutPage() {
               <Lock className="size-4 text-pq" /> Security
             </p>
             <p className="text-ink">The merchant gets your passport as ML-KEM-1024 ciphertext. The agent never sees it.</p>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="inline-flex items-center gap-2 text-ink-2">
-                Escrow <Pill tone="pass">Real · diana</Pill>
-              </span>
-              <a
-                href={explorerAddressUrl(ADDRESSES.escrow)}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={`FlightEscrow ${ADDRESSES.escrow} on the QoreChain explorer`}
-                className="inline-flex items-center gap-1 font-mono text-xs text-brand hover:underline"
-              >
-                {shortAddr(ADDRESSES.escrow, 8, 4)}
-                <ExternalLink className="size-3" />
-              </a>
-            </div>
+            {/* Live shows the deployed FlightEscrow from the server config, never the placeholder (D-02, D-21). */}
+            {escrowAddr ? (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-2 text-ink-2">
+                  Escrow <Pill tone="pass">Real · diana</Pill>
+                </span>
+                <a
+                  href={explorerAddressUrl(escrowAddr)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`FlightEscrow ${escrowAddr} on the QoreChain explorer`}
+                  className="inline-flex items-center gap-1 font-mono text-xs text-brand hover:underline"
+                >
+                  {shortAddr(escrowAddr, 8, 4)}
+                  <ExternalLink className="size-3" />
+                </a>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between">
+                <span className="text-ink-2">Escrow</span>
+                <span className="text-xs text-muted">not available</span>
+              </div>
+            )}
             <p className="text-xs text-muted">
-              FlightEscrow is deployed on diana; the tx hashes on this page are simulated. Signatures are real.{" "}
+              {state.mode === "live"
+                ? "Live on diana: steps tagged “Live tx” are real transactions; signatures are real."
+                : "FlightEscrow is deployed on diana; the tx hashes on this page are simulated. Signatures are real."}{" "}
               <Link href="/ticket#proofs" className="text-brand hover:underline">
                 All proofs
               </Link>
@@ -357,6 +603,15 @@ export default function CheckoutPage() {
         </aside>
       </div>
     </>
+  );
+}
+
+/** book() succeeded but the booking never finished on-chain: the QOR stays Locked until refund() opens (D-26). */
+function EscrowNotice({ bookingId }: { bookingId?: string }) {
+  return (
+    <p className="mt-2 flex flex-wrap items-center gap-1">
+      Your QOR is locked in FlightEscrow for booking {bookingId ? <HashText value={bookingId} head={10} tail={6} /> : "(unknown id)"}. Refunds after the ticket window.
+    </p>
   );
 }
 

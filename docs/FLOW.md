@@ -162,6 +162,25 @@ QoreChain 規定 agent 必須真的在鏈上動作，所以要按這個順序把
 | forge 廣播 | `forge script --broadcast` 被拒時會自己重送（"after 4 attempts"）。所以部署只用 forge 模擬，再由 `scripts/escrow/tx.ts` 簽名並只送一次；送出出錯時會先查 receipt 和 nonce，不會重送 |
 | EVM gas（實測） | base fee 100 gwei；現行合約：部署 1,673,638、`setMandate` 140,660、`book` 351,734、`confirmTicket` 238,661、`cancel` 243,690、`refund` 50,112（第一版：部署 1,661,885、`setMandate` 140,777、`book` 350,823、`confirmTicket` 239,069、`cancel` 243,746、`refund` 50,026）。`pqcVerify` 單獨呼叫估計約 312k（含 calldata） |
 
+**live-checkout 依賴的鏈上行為（#17，`pnpm live:probe`）：**
+
+spec §4.3 依賴、還沒驗證過的六件事，由 `pnpm live:probe` 在 diana 上用小額真交易和一份臨時部署的 `ProbeRecorder`（`contracts/probe/`，記錄 `msg.sender`、`msg.value` 與 selector）逐項確認。腳本跑完會把結論、交易雜湊與 explorer 連結寫進下方標記之間；結果推翻決策時，另外產生一則給 #16 的留言。以探測為準，不以 spec 為準。
+
+跑法：先 `pnpm bootstrap`（三個帳號、ML-DSA-87 已註冊、owner 有餘額），再 `pnpm live:probe`（會先列出要送的交易並要求確認；第 5 項會請你打開 explorer 連結回答 y/n）。廣播一律不重試，只有讀取會重試。
+
+<!-- live:probe:start -->
+**尚未實測。** 以下六項都還沒有在 diana 上跑過 `pnpm live:probe`：
+
+| # | 項目 | 結論 |
+|---|---|---|
+| 1 | MsgExecuteEVM（Linked agent key）的 msg.sender 是 owner 帳號 0x，msg.value 從 owner 帳號出 | 未實測 |
+| 2 | coin-60 signer 送一般 EVM 交易的前置條件（PQC 註冊、Scoped window） | 未實測 |
+| 3 | 帶 selector 的 allowedEvmCalls 放行指定函式、擋下其他函式 | 未實測 |
+| 4 | window 管得到 MsgExecuteEVM | 未實測 |
+| 5 | explorer 認 0x EVM 交易雜湊 | 未實測 |
+| 6 | derivePqcCanonical 商家金鑰經共用 escrow 模組簽的 ML-DSA-87 簽章能被鏈上公鑰驗過 | 未實測 |
+<!-- live:probe:end -->
+
 ## 檔案地圖
 
 ```

@@ -27,15 +27,19 @@ export default function TicketPage() {
 
   const m = state.draft;
   const price = booking.quotedPriceUsd ?? booking.priceUsd;
-  const stepHash = (k: string) => booking.steps.find((s) => s.key === k)?.hash ?? "";
+  const step = (k: string) => booking.steps.find((s) => s.key === k);
+  const stepHash = (k: string) => step(k)?.hash ?? "";
+  /** A chain row is real only when its own tx is a Live tx with a hash (D-21). */
+  const isLive = (k: string) => step(k)?.source === "live" && !!step(k)?.hash;
+  const anyLive = isLive("lock") || isLive("release");
 
   const proofs = [
     { label: "Mandate hash", note: "SHA-256 of your rules", value: state.signed.hash, real: true },
     { label: "Your signature", note: `ML-DSA-87 · ${state.signed.sigBytes.toLocaleString()} bytes`, value: state.signed.sigPreview, real: true },
     { label: "Quote signature", note: "ML-DSA-87, checked by pqcVerify", value: booking.quoteSigPreview ?? "", real: true },
-    { label: "Escrow payment", note: "FlightEscrow.book()", value: stepHash("lock"), real: false },
+    { label: "Escrow payment", note: "FlightEscrow.book()", value: stepHash("lock"), real: false, live: isLive("lock"), explorerUrl: step("lock")?.explorerUrl },
     { label: "Ticket proof", note: "ML-DSA-87, checked before payout", value: booking.proofSigPreview ?? "", real: true },
-    { label: "Payout", note: STEP_META.release.msg!, value: stepHash("release"), real: false },
+    { label: "Payout", note: STEP_META.release.msg!, value: stepHash("release"), real: false, live: isLive("release"), explorerUrl: step("release")?.explorerUrl },
     { label: "Passport ciphertext", note: `ML-KEM-1024 · ${state.passenger?.kemCiphertextBytes.toLocaleString()} bytes`, value: `0x${state.passenger?.preview ?? ""}`, real: true },
   ];
 
@@ -96,7 +100,11 @@ export default function TicketPage() {
           <Card id="proofs" className="overflow-hidden">
             <div className="border-b border-line px-6 py-4">
               <h2 className="text-lg font-bold text-ink">Proofs</h2>
-              <p className="text-sm text-muted">Signatures and encryption are computed for real. Chain transactions are simulated in this demo.</p>
+              <p className="text-sm text-muted">
+                {anyLive
+                  ? "Signatures and encryption are computed for real. Rows tagged “Live tx · diana” are transactions on the diana testnet; the rest are simulated."
+                  : "Signatures and encryption are computed for real. Chain transactions are simulated in this demo."}
+              </p>
             </div>
             <ul className="divide-y divide-line">
               {proofs.map((p) => (
@@ -105,8 +113,8 @@ export default function TicketPage() {
                     <p className="font-bold text-ink">{p.label}</p>
                     <p className="text-xs text-muted">{p.note}</p>
                   </div>
-                  <HashText value={p.value} head={18} tail={6} className="justify-self-start" />
-                  <SourceTag real={p.real} />
+                  <HashText value={p.value} head={18} tail={6} className="justify-self-start" explorerUrl={"explorerUrl" in p ? p.explorerUrl : undefined} />
+                  <SourceTag kind={p.real ? "crypto" : "live" in p && p.live ? "live-tx" : "simulated"} />
                 </li>
               ))}
             </ul>

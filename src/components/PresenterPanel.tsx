@@ -4,14 +4,20 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { MonitorPlay, RotateCcw, X } from "lucide-react";
+import { liveChain, type ChainStatus } from "@/lib/chain";
 import { useDemo } from "@/lib/store";
-import type { Scenario } from "@/lib/types";
+import type { DemoMode, Scenario } from "@/lib/types";
 import { cx } from "./ui";
 
 const SCENARIOS: Array<{ key: Scenario; label: string; hint: string }> = [
   { key: "normal", label: "Ticketed", hint: "Quote passes, ticket issued, payout" },
   { key: "price_change", label: "Fare jumps", hint: "Quote rises to US$428, gate blocks it" },
   { key: "order_fail", label: "Booking fails", hint: "Duffel fails after escrow, auto refund" },
+];
+
+const MODES: Array<{ key: DemoMode; label: string }> = [
+  { key: "simulated", label: "Simulated" },
+  { key: "live", label: "Live" },
 ];
 
 const JUMPS = [
@@ -25,9 +31,26 @@ const JUMPS = [
 
 /** Floating control panel for whoever presents the demo. Toggle with the D key. */
 export function PresenterPanel() {
-  const { state, update, reset } = useDemo();
+  const { state, update, reset, signing } = useDemo();
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [live, setLive] = useState<ChainStatus | undefined>();
+
+  // Ask the server whether Live can run each time the panel opens (the server caches 30 s).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    liveChain.status().then((st) => {
+      if (!cancelled) setLive(st);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const bookingRunning = state.booking?.status === "running";
+  const modeLocked = bookingRunning || signing;
+  const liveSelectable = live?.available === true;
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -48,6 +71,42 @@ export function PresenterPanel() {
             <button type="button" onClick={() => setOpen(false)} aria-label="Close" className="text-muted hover:text-ink">
               <X className="size-4" />
             </button>
+          </div>
+
+          <p className="mb-2 text-xs font-bold tracking-wide text-muted">Chain</p>
+          <div className="mb-4">
+            <div className="grid grid-cols-2 rounded-lg border border-line p-0.5" role="radiogroup" aria-label="Chain mode">
+              {MODES.map((md) => {
+                const disabled = modeLocked || (md.key === "live" && !liveSelectable && state.mode !== "live");
+                return (
+                  <button
+                    key={md.key}
+                    type="button"
+                    role="radio"
+                    aria-checked={state.mode === md.key}
+                    disabled={disabled}
+                    onClick={() => update((st) => ({ ...st, mode: md.key }))}
+                    className={cx(
+                      "rounded-md px-3 py-1 text-xs font-bold disabled:cursor-not-allowed",
+                      state.mode === md.key ? "bg-brand text-white" : "text-ink-2 disabled:text-muted/60",
+                    )}
+                  >
+                    {md.label}
+                  </button>
+                );
+              })}
+            </div>
+            {modeLocked ? (
+              <p className="mt-1.5 text-[11px] text-muted">
+                Locked while {bookingRunning ? "a booking is running" : "the signing window is open"}.
+              </p>
+            ) : !live ? (
+              <p className="mt-1.5 text-[11px] text-muted">Checking Live…</p>
+            ) : live.available ? (
+              <p className="mt-1.5 text-[11px] text-pass">Live ready on diana.</p>
+            ) : (
+              <p className="mt-1.5 text-[11px] text-block">Live unavailable: {live.reason}</p>
+            )}
           </div>
 
           <p className="mb-2 text-xs font-bold tracking-wide text-muted">Next booking scenario</p>
