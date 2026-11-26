@@ -107,7 +107,7 @@ export interface ServerChain {
   evmBalance(address: Hex): Promise<bigint>;
   /** eth_getLogs from `fromBlock` to latest. Throws when the logs cannot be read in full. */
   getLogs(filter: LogFilter): Promise<EvmLog[]>;
-  /** Keys linked to a qor1 account, revoked ones included. */
+  /** Keys linked to a qor1 account, revoked ones included; none before the account's first link creates it. */
   linkedKeys(cosmos: string): Promise<LinkedKey[]>;
   /** eth_call at latest. Resolves with the revert data when the call reverts; throws on RPC errors. */
   ethCall(req: EthCallRequest): Promise<EthCallResult>;

@@ -29,6 +29,7 @@ import { deriveEvmRole } from "../../../scripts/evm/keys";
 import { decodePqcKeyStatus, encodePqcKeyStatusCall, PQC_KEY_STATUS_ADDRESS } from "../../../scripts/evm/pqcKeyStatus";
 import type { BroadcastOutcome, CosmosMsg, EthCallResult, EvmLog, Hex, ServerChain } from "./chain";
 import type { LiveNetwork, LiveRole } from "./config";
+import { linkedKeysOrNone } from "./linked-keys";
 
 /** Longest a single read may take before it counts as an RPC error. */
 const READ_TIMEOUT_MS = 10_000;
@@ -187,7 +188,7 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
       return out;
     },
     async linkedKeys(cosmos) {
-      const keys = await retrying(() => fetchAuthenticators({ rest: network.rest, address: cosmos }));
+      const keys = await linkedKeysOrNone(() => retrying(() => fetchAuthenticators({ rest: network.rest, address: cosmos })));
       return keys.map((k) => ({
         pubkeyHex: k.pubkeyHex.toLowerCase().replace(/^0x/, ""),
         revoked: k.revoked,
