@@ -131,6 +131,26 @@ QoreChain 規定 agent 必須真的在鏈上動作，所以要按這個順序把
 4. **攻擊演習**：把 `runOne()` 改成真的用 agent 私鑰送交易，錯誤碼直接顯示鏈上回傳的結果。
 5. **Claude**：把 `parseIntent()` 換成 Claude，排序理由也由 Claude 產生；閘門與合約不變。
 
+## diana 測試網實測記錄
+
+2026-11-24 以 `@qorechain/sdk@0.14.0` 實測，後續工作直接沿用，不用重查。
+
+**瀏覽器打包結論：可打包。** 在 repo 外用 esbuild 0.28.2 `--bundle --platform=browser --format=esm` 打包一支 import 並呼叫 `createClient`、`generateMnemonic`、`deriveNativeAccount`、`derivePqcCanonical`、`directSignerFromPrivateKey`、`client.connectTx`、`fetchPqcStatus` 的小檔：
+
+- 成功，零錯誤、零警告，不需要任何 Node 內建模組 polyfill（沒有 `node:`／`fs`／`crypto` 匯入）。
+- 體積：未壓縮 5.8 MB，minify 後 2.9 MB，gzip 後約 560 KB。大宗是 `cosmjs-types`、SDK 本身、`viem`；前端若要用，必須動態 `import()`，不要放進首屏。
+- 程式裡的 `Buffer`、`process.versions` 都有 `typeof` 判斷，瀏覽器會走 `atob`／`btoa` 分支。唯一沒判斷的是 `cosmjs-types` 的 `setPaginationParams`（帶 `pagination.key` 的分頁查詢才會走到），用到時要另外處理。
+- 只驗證打包，還沒在真實瀏覽器跑過。owner 簽章可以留在前端做，agent／商家金鑰仍照原計畫放伺服器端。
+
+**測試網事實：**
+
+| 項目 | 實測 |
+|---|---|
+| 水龍頭 | 必須手動：`dashboard.qorechain.io/faucet`，需登入 dashboard、沒有公開 API；每帳號、每地址 24 小時各 100 QOR |
+| 出塊時間 | 約 1.03 秒（主網約 3.1 秒），chain v3.2.6，已支援擁有證明 |
+| 公開端點 | `rpc-testnet.qore.host`、`api-testnet.qore.host`、`evm-testnet.qore.host` 每 IP 限流，腳本要重試 |
+| PQC 狀態查詢 | REST `GET {rest}/qorechain/pqc/v1/account/{address}`（SDK `fetchPqcStatus`）；公開端點不提供 `qor_*` JSON-RPC |
+
 ## 檔案地圖
 
 ```
