@@ -12,6 +12,7 @@ function txResponse(o: { hash: string; height: string; code?: number; messages: 
   return {
     txhash: o.hash,
     height: o.height,
+    timestamp: "2026-11-28T05:37:44Z",
     code: o.code ?? 0,
     tx: { body: { messages: o.messages } },
     events: (o.failedIndexes ?? []).map((i) => ({
@@ -20,11 +21,13 @@ function txResponse(o: { hash: string; height: string; code?: number; messages: 
     })),
   };
 }
-const execute = (data: string, account = OWNER) => ({ "@type": EXECUTE, account, to: ESCROW, value: "1", data: b64(data) });
+const execute = (data: string, account = OWNER) => ({ "@type": EXECUTE, account, to: ESCROW, value: "3620000000000000000", data: b64(data) });
 
-test("a MsgExecuteEVM that ran as the account is kept, with its hash, height, target and calldata", () => {
+test("a MsgExecuteEVM that ran as the account is kept, with its hash, height, target, calldata, value and time", () => {
   const calls = executedEvmCallsOf([txResponse({ hash: "BECF", height: "10782379", messages: [execute("2f876d8c01")] })], OWNER);
-  assert.deepEqual(calls, [{ hash: "BECF", height: BigInt(10782379), to: ESCROW, data: "0x2f876d8c01" }]);
+  assert.deepEqual(calls, [
+    { hash: "BECF", height: BigInt(10782379), to: ESCROW, data: "0x2f876d8c01", valueWei: BigInt("3620000000000000000"), timeUnix: Date.parse("2026-11-28T05:37:44Z") / 1000 },
+  ]);
 });
 
 test("failed executions, failed txs, other accounts and other messages are left out", () => {

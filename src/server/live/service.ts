@@ -17,6 +17,7 @@ import {
   parseMandate,
   parseMandateHash,
   setMandateData,
+  spentTodayUqor,
   STEP_TIMEOUT_MS,
   windowMsg,
   type LiveMandateStep,
@@ -179,17 +180,21 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
     const escrow = st.escrow as Hex;
     const k = await liveKeys();
     const owner = k.roles.owner.account;
-    const limits = mandateLimits(m, config.uqorPerUsd, clock.now());
+    let limits = mandateLimits(m, config.uqorPerUsd, clock.now());
     if (limits.windowBlocks < 1) return refused(step, "mandate expired", "The mandate expires before a window could open; nothing was sent");
 
-    // Tickets used so far (D-29). Read before the first broadcast, and again for setMandate.
+    // Tickets used so far (D-29), and on link what the agent key spent today (D-13). Read before
+    // the first broadcast, and again for setMandate. Only the authenticator lane books through
+    // the linked key, so only it reads the owner account's MsgExecuteEVM history.
     let used: number | undefined;
     if (step === "link" || step === "mandate") {
       if (config.deployBlock === undefined) {
         return refused(step, "ticket count unknown", "FLIGHT_ESCROW_DEPLOY_BLOCK is not set, so the tickets already used cannot be counted; nothing was sent");
       }
       try {
-        used = await countUsedTickets(chain, escrow, config.deployBlock, bookSender(config.lane, k), config.lane === "authenticator" ? owner.cosmos : undefined);
+        const executed = config.lane === "authenticator" ? await chain.executedEvmCalls(owner.cosmos) : [];
+        used = await countUsedTickets(chain, escrow, config.deployBlock, bookSender(config.lane, k), executed);
+        limits = { ...limits, dailyLimit: limits.dailyLimit + spentTodayUqor(executed, clock.now()) };
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
         return refused(step, "ticket count unknown", `Could not read the bookings made so far (${why}), so the tickets already used are unknown; nothing was sent`);
