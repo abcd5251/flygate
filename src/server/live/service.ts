@@ -128,6 +128,11 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
       }
       const zero = BigInt(0);
       if ((await chain.bankBalance(k.roles.agent.account.cosmos)) <= zero) fail("Relayer (agent account) has no balance");
+      // EVM txs come from the coin-60 signers: each needs its own registered ML-DSA-87 key.
+      for (const role of ["owner", "agent"] as const) {
+        const s = await chain.pqcKeyStatus(k.roles[role].signer.address);
+        if (!s.registered || !s.possessionProven) fail(`${role === "owner" ? "Owner" : "Agent"} EVM signer has no registered ML-DSA-87 key with proof of possession (pnpm live:probe registers it)`);
+      }
       if ((await chain.evmBalance(k.roles.owner.signer.address)) <= zero) fail("Owner EVM signer has no balance (it sends setMandate)");
       if ((await chain.evmBalance(k.roles.agent.signer.address)) <= zero) {
         fail("Agent EVM signer has no balance (it sends confirmTicket and cancel)");

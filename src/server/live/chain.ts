@@ -129,6 +129,10 @@ export interface ServerChain {
    * registered ML-DSA-87 key; waits for inclusion. Lane "cosmos", Cosmos hash.
    */
   sendCosmos(from: LiveRole, messages: CosmosMsg[], opts: BroadcastOptions): Promise<BroadcastOutcome>;
-  /** One EVM tx from `from`'s coin-60 signer; waits for the receipt. Lane "evm", 0x hash. */
+  /**
+   * One EVM tx from `from`'s coin-60 signer; waits for the receipt. Lane "evm", 0x hash. First
+   * opens an EVM window on that signer when the open one does not admit the tx (docs/FLOW.md);
+   * a failed window tx is the outcome (lane "cosmos") and the EVM tx is then not sent.
+   */
   sendEvm(from: LiveRole, tx: EvmTxRequest, opts: BroadcastOptions): Promise<BroadcastOutcome>;
 }

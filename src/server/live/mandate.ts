@@ -9,8 +9,9 @@ import { MAX_FEE_UQOR, usdToUqor, WEI_PER_UQOR } from "./money";
 
 /**
  * The three owner transactions of a Live /mandate, in their fixed order (D-12): link the agent
- * key with its spending rule (Cosmos), open the Scoped window (Cosmos), then setMandate (EVM),
- * which is signed only after the window tx because opening a window advances the EVM nonce.
+ * key with its spending rule (Cosmos), open the Scoped window on the owner account (Cosmos), then
+ * setMandate (EVM) from the owner's coin-60 signer, which needs its own EVM window (`sendEvm`
+ * opens it).
  */
 export const LIVE_MANDATE_STEPS = ["link", "window", "mandate"] as const;
 export type LiveMandateStep = (typeof LIVE_MANDATE_STEPS)[number];
