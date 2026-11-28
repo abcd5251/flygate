@@ -156,7 +156,7 @@ FlyGate 的 8 道關卡裡，跟鏈有關的步驟（授權綁定、開 window�
 - 交易順序固定：link（Cosmos 交易）→ open window（Cosmos 交易）→ `setMandate`（EVM 交易）。開 window 會推進 EVM nonce，所以 EVM 交易在開完之後才簽。
 - **`linkAuthenticatorMsgs`**：`owner` 是 owner 的 qor1，`account` 省略；`scheme` 為 `secp256k1`，`pubkey` 是 agent ETH 地址 20 bytes；`permissions = ["evm"]`；`expiryUnix` 等於 mandate 的 `expiresAt`；帶 `chainId: "qorechain-diana"` 讓 SDK 先本地驗證擁有證明。只放一條 `spendingRule`：`perTxLimit` = 票價上限換算成 uqor（§4.5）、`dailyLimit` = `perTxLimit × maxTickets`、`allowedEvmCalls = ["0x<escrow>/0x<book() selector>"]`（只放行 `book()`，絕不含 `setMandate`、`revokeMandate`）、`enabled = true`。`MsgUpdateSpendingRules` 整批取代，每次送完整一份。
 - **`openEvmWindowMsg`（Scoped window）**：sender 是 owner 帳號（qor1）；`allowedTargets = [FlightEscrow 地址]`；`maxTxs = mandate.maxTickets`；`maxValue` =（每張票上限 + 最大手續費）× `maxTickets`，單位 uqor、無條件進位；`blocks` = min(3,600, 距 mandate 到期的區塊數)。若探測發現 window 管不到 `MsgExecuteEVM`，仍然開 window，但 /mandate 規則表「Scoped window · allowedTargets／maxTxs」兩列的說明改成它實際管住的東西。
-- **`setMandate`**：見 §4.3。鏈上 `maxTickets` 的值：伺服器用 `eth_getLogs` 從 `FLIGHT_ESCROW_DEPLOY_BLOCK` 起查這個 agent 地址的 `Booked` 事件，減掉已 `Refunded` 的，得到 `used`；鏈上 `maxTickets = used + mandate.maxTickets`，畫面仍顯示原本的張數。log 查不到（例如 RPC 限制範圍）時 Live 簽署直接失敗並說明原因，不猜數字。
+- **`setMandate`**：見 §4.3。鏈上 `maxTickets` 的值：伺服器從 `FLIGHT_ESCROW_DEPLOY_BLOCK` 起算這個 agent 地址的訂位——`eth_getLogs` 查到的 `Booked` 事件，加上 owner 帳號成功執行的 `MsgExecuteEVM` `book()`（authenticator 通道的 log 不會出現在 `eth_getLogs`，改用 Cosmos tx search 讀），依 bookingId 去重後減掉已 `Refunded` 的，得到 `used`；鏈上 `maxTickets = used + mandate.maxTickets`，畫面仍顯示原本的張數。log 或交易紀錄查不到（例如 RPC 限制範圍、節點已刪除舊區塊）時 Live 簽署直接失敗並說明原因，不猜數字。
 - `SignedMandate` 加上 `mode` 欄位，記錄是在哪個模式簽的（§4.8）。
 
 依據：D-10、D-12、D-13、D-25、D-29
@@ -222,7 +222,7 @@ FlyGate 的 8 道關卡裡，跟鏈有關的步驟（授權綁定、開 window�
 
 - **廣播一律不重試**，只有讀取可以重試（沿用 bootstrap 規則）。
 - 伺服器在記憶體以 `(step, bookingId)` 為 key 存冪等表；同一個 key 再進來直接回傳上次結果，不重送。`bookingId` 在送出前就能從 quote 算出（共用編碼模組的 `bookingId()`）。/mandate 的三筆交易也以等價的 key（例如 mandate hash + step）冪等。
-- client 把步驟的 running 狀態和 bookingId 存在 sessionStorage；重新整理後向伺服器查這筆 booking 的狀態（從 `Booked`、`Released`、`Refunded` 事件推導），而不是再送一次。
+- client 把步驟的 running 狀態和 bookingId 存在 sessionStorage；重新整理後向伺服器查這筆 booking 的狀態（從 `Booked`、`Released`、`Refunded` 事件推導；authenticator 通道沒有可查的 `Booked`，改用 owner 帳號成功執行的 `MsgExecuteEVM` `book()`，D-29），而不是再送一次。
 - 每筆交易等到上鏈才算完成（SDK 廣播後等待；diana 約 1 秒出塊）。每個步驟保留原本的最短動畫時間；每步最多等 30 秒，逾時進入 §4.8 的退回流程。Speed 在 Live 模式只影響動畫。
 
 依據：D-28、D-30

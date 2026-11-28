@@ -416,14 +416,15 @@
 
 ### D-29 合約的 `ticketsUsed` 在重設 mandate 時會保留，也沒有查詢函式。Demo 跑第二輪時，`book()` 會因為 `TicketQuotaExhausted` 失敗，怎麼辦？
 - 分支：冪等與跨回合 > 票數額度
-- 回答：每次在 Live 模式簽 mandate 時，伺服器用 `eth_getLogs` 從 `FLIGHT_ESCROW_DEPLOY_BLOCK` 開始，查出這個 agent 地址的 `Booked` 事件，減掉已經 `Refunded` 的，算出目前用掉的張數 `used`。鏈上的 `maxTickets` 設成 `used + mandate.maxTickets`，畫面仍顯示「1 ticket」。這樣每一輪 Demo，剛好只能再買 `mandate.maxTickets` 張，「不能買兩次」的說法依然成立。log 查不到時（例如 RPC 限制查詢範圍），Live 簽署直接失敗並說明原因，不要猜一個數字。
-- 依據：【假設】`contracts/FlightEscrow.sol:111`（`ticketsUsed` 在重設時保留）、`:126`（`mandates` 是 internal，沒有 getter）、`:216-217`
-- 信心：低
+- 回答：每次在 Live 模式簽 mandate 時，伺服器從 `FLIGHT_ESCROW_DEPLOY_BLOCK` 起算出這個 agent 地址目前用掉的張數 `used`：EOA 通道的 `book()` 用 `eth_getLogs` 查 `Booked` 事件；authenticator 通道的 `book()`（`MsgExecuteEVM`）不會留下 `eth_getLogs` 查得到的 log，所以另外用 Cosmos tx search（`message.sender=<owner qor1>`）讀 owner 帳號成功執行的 `MsgExecuteEVM`，從 `book()` calldata 算出 bookingId。兩者合併去重，再扣掉已 `Refunded` 的。鏈上的 `maxTickets` 設成 `used + mandate.maxTickets`，畫面仍顯示「1 ticket」。log 或交易紀錄查不到時（例如 RPC 限制查詢範圍、節點已刪除舊區塊），Live 簽署直接失敗並說明原因，不要猜一個數字。查 booking 狀態（#24）也用同樣方式找 authenticator 通道的訂位。
+- 原答案：每次在 Live 模式簽 mandate 時，伺服器用 `eth_getLogs` 從 `FLIGHT_ESCROW_DEPLOY_BLOCK` 開始，查出這個 agent 地址的 `Booked` 事件，減掉已經 `Refunded` 的，算出目前用掉的張數 `used`。鏈上的 `maxTickets` 設成 `used + mandate.maxTickets`，畫面仍顯示「1 ticket」。這樣每一輪 Demo，剛好只能再買 `mandate.maxTickets` 張，「不能買兩次」的說法依然成立。log 查不到時（例如 RPC 限制查詢範圍），Live 簽署直接失敗並說明原因，不要猜一個數字。
+- 依據：【實測】diana 上 authenticator 通道的 `book()`（tx `BECF62A7…`，區塊 10782379）沒有 `eth_getLogs` 查得到的 `Booked`，下一輪 `book()`（tx `956D47E9…`）因此 revert `TicketQuotaExhausted(1)`；原依據【假設】`contracts/FlightEscrow.sol:111`（`ticketsUsed` 在重設時保留）、`:126`（`mandates` 是 internal，沒有 getter）、`:216-217`
+- 信心：高（修正後在 diana 唯讀驗證：`used = 1`，11/26 的訂位查得到 `Released`）
 - 影響程度：高（會寫入鏈上的 mandate 資料，算錯就會讓 agent 多買或買不到）
 - 考慮過的其他選項：請 #7 加一個 `ticketsUsed(agent)` view 函式（要改已經完成測試的合約，屬於跨功能）；每輪 Demo 換一個新的 owner 帳號（要重跑水龍頭）；把鏈上 `maxTickets` 設一個很大的數字（等於讓鏈上的張數限制失效）
 - 衝突：無
-- 狀態：有效
-- 影響到：spec §3、spec §4.4、spec §7、#20
+- 狀態：已修正
+- 影響到：spec §3、spec §4.4、spec §7、#20、commit 880cb36（Live: count and find book() calls sent through the linked agent key）
 
 ### D-30 Live 交易要等多久？Demo 的節奏和動畫速度怎麼維持？
 - 分支：冪等與跨回合 > 等待與節奏
