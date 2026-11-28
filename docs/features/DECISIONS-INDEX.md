@@ -16,7 +16,7 @@
 - live-checkout/D-10｜setMandate 由 owner 的 EVM signer 送；agent 欄位填 owner 帳號 0x；退款回 owner 的 EVM signer（ADR-0002）｜假設｜高｜有效
 - live-checkout/D-11｜第一張 ticket 是 diana 探測（pnpm live:probe）；保留 lane 設定點，必要時退回 EOA lane｜假設｜高｜有效
 - live-checkout/D-12｜window 開在 owner 帳號、只放行 FlightEscrow；交易順序 link → window → setMandate｜程式碼｜高｜有效
-- live-checkout/D-13｜支出規則：perTxLimit 等於票價上限，allowedEvmCalls 只放行 escrow 的 book() selector｜程式碼｜高｜有效
+- live-checkout/D-13｜支出規則：perTxLimit 等於票價上限，dailyLimit = 今天已花 + perTxLimit × maxTickets，allowedEvmCalls 只放行 escrow 的 book() selector｜實測｜高｜已修正
 - live-checkout/D-14｜Live 換算 1 US$ = 0.01 QOR（跨功能衝突：#7 的 1 QOR = US$1）｜文件｜高｜有效
 - live-checkout/D-15｜Offer／Mandate 對應到合約 Quote／Mandate：城市代碼、unix day、ticketWindow 600 秒，統一走 escrow.ts 編碼｜程式碼｜高｜有效
 - live-checkout/D-16｜Ticketed 有 2 筆真交易（book、confirmTicket）；release 共用 confirmTicket 的雜湊；verify 用 eth_call｜程式碼｜高｜有效

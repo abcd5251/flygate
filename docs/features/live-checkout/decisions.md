@@ -196,17 +196,18 @@
   - `permissions = ["evm"]`，`expiryUnix` 等於 mandate 的 `expiresAt`，同時帶 `chainId: "qorechain-diana"`，讓 SDK 先在本地驗證擁有證明。
   - 只放一條 `spendingRule`：
     - `perTxLimit` 是票價上限換算成 uqor（D-14）。
-    - `dailyLimit` 是 `perTxLimit × maxTickets`。
+    - `dailyLimit` 是「agent 金鑰今天（UTC）已花掉的金額 + `perTxLimit × maxTickets`」。鏈上以 UTC 日曆日累計每日額度，換掉規則也不會歸零，所以每次 link（每輪 Reset Demo 後重簽）都把今天已花的加上去，讓每一輪都有完整的額度。已花金額 = owner 帳號今天成功執行的 `MsgExecuteEVM` 的 `value` 總和（和 D-29 讀同一份交易紀錄）；讀不到時簽署失敗，不猜數字。EOA 通道不經過 linked key，不讀紀錄。
     - `allowedEvmCalls = ["0x<escrow>/0x<book() selector>"]`，**只放行 `book()`**，絕不包含 `setMandate` 或 `revokeMandate`。
     - `enabled = true`。
   - `MsgUpdateSpendingRules` 會整批取代規則，所以每次都送完整的一份。
-- 依據：【程式碼】SDK `index.d.ts` 第 7256-7295 行（`SpendingRule`：`perTxLimit`、`dailyLimit`、`allowedEvmCalls` 的 selector 格式）、第 14821-14863 行（`LinkAuthenticatorMsgsInput`，以及「REPLACES the account's rules wholesale」）
-- 信心：中
+- 原答案：`dailyLimit` 是 `perTxLimit × maxTickets`（其餘相同）。
+- 依據：【實測】diana 上同一個 UTC 日的第二輪 `book()` 失敗：「daily limit 4000000uqor exceeded: spent 3620000, remaining 380000」，第一輪是 tx `2E7F4CAA…`；SDK `index.d.ts` 第 7248-7255 行（daily limit 以 UTC 日曆日計）；原依據【程式碼】SDK `index.d.ts` 第 7256-7295 行（`SpendingRule`：`perTxLimit`、`dailyLimit`、`allowedEvmCalls` 的 selector 格式）、第 14821-14863 行（`LinkAuthenticatorMsgsInput`，以及「REPLACES the account's rules wholesale」）
+- 信心：高（修正後在 diana 唯讀驗證：今天已花 3,620,000 uqor，與鏈上訊息相符）
 - 影響程度：高（這組規則決定 agent 金鑰外洩時能造成多少損失）
 - 考慮過的其他選項：只放行整個合約 `0x<escrow>`（agent 就能呼叫 `setMandate`，否決）；`permissions = ["all"]`（範圍太大）
 - 衝突：無
-- 狀態：有效
-- 影響到：spec §2、spec §3、spec §4.4、#17、#20
+- 狀態：已修正
+- 影響到：spec §2、spec §3、spec §4.4、#17、#20、commit 6e51d0c（Live link: daily limit = spent today + this round's budget）
 
 ### D-14 Live 模式下，US$ 票價要換算成多少 QOR？
 - 分支：金額單位與資料對應 > 換算比例
