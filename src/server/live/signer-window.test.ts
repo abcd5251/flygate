@@ -1,8 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { WindowView } from "../../../scripts/escrow/plan";
-import { SIGNER_GAS_CAP, SIGNER_WINDOW_TXS, signerWindowToOpen } from "./signer-window";
-import { WINDOW_MAX_BLOCKS } from "./mandate";
+import { SIGNER_GAS_CAP, SIGNER_WINDOW_TXS, signerWindowToOpen, WINDOW_MAX_BLOCKS } from "./signer-window";
 
 const ESCROW = "0x1111111111111111111111111111111111111111";
 const GWEI = BigInt(1_000_000_000);

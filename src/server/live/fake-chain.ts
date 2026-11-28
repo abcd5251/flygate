@@ -1,22 +1,7 @@
 import "server-only";
 import { decodeFunctionData, encodeFunctionResult, hexToBytes } from "viem";
-import { PQC_VERIFY_ABI, PQC_VERIFY_ADDRESS, verifyMessage } from "@/lib/escrow";
-import type {
-  BroadcastOptions,
-  BroadcastOutcome,
-  CosmosMsg,
-  EthCallRequest,
-  EthCallResult,
-  EvmAuthDigestVersion,
-  EvmLog,
-  EvmTxRequest,
-  ExecutedEvmCall,
-  Hex,
-  LinkedKey,
-  LogFilter,
-  PqcKeyStatus,
-  ServerChain,
-} from "./chain";
+import { FLIGHT_ESCROW_ABI, PQC_VERIFY_ABI, PQC_VERIFY_ADDRESS, SELECTORS, verifyMessage } from "@/lib/escrow";
+import type { BroadcastOptions, BroadcastOutcome, EthCallRequest, EthCallResult, EvmLog, EvmTxRequest, Hex, IncludedCosmosTx, LogFilter, PqcKeyStatus, ServerChain } from "./chain";
 import type { LiveRole } from "./config";
 
 export type FakeCall = { method: keyof ServerChain; args: unknown[] };
@@ -37,22 +22,34 @@ export interface FakeChainState {
   evm: Record<string, bigint>;
   /** Every log on the chain; getLogs filters them. */
   logs: EvmLog[];
-  /** Successful MsgExecuteEVM calls per qor1 account. */
-  executed: Record<string, ExecutedEvmCall[]>;
-  /** Linked keys per qor1 account. */
-  linked: Record<string, LinkedKey[]>;
-  /** Authenticator sequence per `${qor1}/${lowercase 0x pubkey}`; missing means 0. */
-  authNonces: Record<string, bigint>;
-  digestVersion: EvmAuthDigestVersion;
   /**
-   * Answers eth_call. The default runs pqcVerify for real (ML-DSA-87 over the call's arguments)
-   * and returns "0x" for anything else.
+   * FlightEscrow.mandateOf answers, keyed `${owner}/${agent}` (lowercase 0x); missing means no
+   * mandate. Read by the default eth_call for any contract address.
+   */
+  mandates: Record<string, FakeMandate>;
+  /** Cosmos txs the owner's wallet sent, by uppercase hash; missing means not included (yet). */
+  cosmosTxs: Record<string, IncludedCosmosTx>;
+  /**
+   * Answers eth_call, except FlightEscrow.mandateOf (from `mandates`). The default runs pqcVerify
+   * for real (ML-DSA-87 over the call's arguments) and returns "0x" for anything else.
    */
   ethCall?: (req: EthCallRequest) => EthCallResult;
   /** Make a method throw this error (an RPC failure). For sends, prefer `outcomes`. */
   fail: Partial<Record<keyof ServerChain, Error>>;
   /** How each broadcast ends, in order; once empty, broadcasts succeed. */
   outcomes: FakeBroadcastSpec[];
+}
+
+/** One (owner, agent) slot of FlightEscrow, as mandateOf returns it. */
+export interface FakeMandate {
+  revoked?: boolean;
+  ticketsUsed?: number;
+  budgetWei: bigint;
+  mandateHash: Hex;
+  maxFareWei?: bigint;
+  maxTickets?: number;
+  /** unix seconds */
+  expiresAt: bigint;
 }
 
 const NOT_REGISTERED: PqcKeyStatus = { registered: false, algorithmId: 0, pubkey: new Uint8Array(), possessionProven: false };
@@ -63,12 +60,12 @@ const DEFAULT_FAILURE: Record<Exclude<FakeBroadcastMode, "success">, { code: str
   failed: { code: "broadcast failed", reason: "rpc error" },
 };
 
-const BROADCASTS: ReadonlySet<keyof ServerChain> = new Set(["sendCosmos", "sendEvm"]);
+const BROADCASTS: ReadonlySet<keyof ServerChain> = new Set(["sendEvm"]);
 
 /**
  * Test double for the server-side chain interface. Records every call in order, answers reads
  * from `state`, and ends each broadcast as `state.outcomes` says (success by default).
- * Hashes are deterministic: Cosmos ones uppercase hex, EVM ones 0x-prefixed.
+ * Hashes are deterministic and 0x-prefixed.
  */
 export class FakeChain implements ServerChain {
   readonly calls: FakeCall[] = [];
@@ -76,7 +73,7 @@ export class FakeChain implements ServerChain {
   private sent = 0;
 
   constructor(state: Partial<FakeChainState> = {}) {
-    this.state = { chainId: 9800, code: {}, pqc: {}, bank: {}, evm: {}, logs: [], executed: {}, linked: {}, authNonces: {}, digestVersion: "v2", fail: {}, outcomes: [], ...state };
+    this.state = { chainId: 9800, code: {}, pqc: {}, bank: {}, evm: {}, logs: [], mandates: {}, cosmosTxs: {}, fail: {}, outcomes: [], ...state };
   }
 
   private record(method: keyof ServerChain, args: unknown[]) {
@@ -89,7 +86,7 @@ export class FakeChain implements ServerChain {
     return this.calls.filter((c) => c.method === method);
   }
 
-  /** Every sendCosmos / sendEvm, in order. */
+  /** Every sendEvm, in order. */
   broadcasts(): FakeCall[] {
     return this.calls.filter((c) => BROADCASTS.has(c.method));
   }
@@ -123,39 +120,25 @@ export class FakeChain implements ServerChain {
         filter.topics.every((t, i) => t === null || log.topics[i]?.toLowerCase() === t.toLowerCase()),
     );
   }
-  async executedEvmCalls(account: string) {
-    this.record("executedEvmCalls", [account]);
-    return this.state.executed[account] ?? [];
-  }
-  async linkedKeys(cosmos: string) {
-    this.record("linkedKeys", [cosmos]);
-    return this.state.linked[cosmos] ?? [];
-  }
   async ethCall(req: EthCallRequest) {
     this.record("ethCall", [req]);
+    // mandateOf always comes from `mandates`; `ethCall` answers every other call.
+    if (req.data.startsWith(SELECTORS.mandateOf)) return mandateOfCall(this.state.mandates, req);
     return this.state.ethCall ? this.state.ethCall(req) : defaultEthCall(req);
   }
-  async authNonce(account: string, pubkey: Hex) {
-    this.record("authNonce", [account, pubkey]);
-    return this.state.authNonces[`${account}/${pubkey.toLowerCase()}`] ?? BigInt(0);
-  }
-  async evmAuthDigestVersion() {
-    this.record("evmAuthDigestVersion", []);
-    return this.state.digestVersion;
-  }
-  async sendCosmos(from: LiveRole, messages: CosmosMsg[], opts: BroadcastOptions) {
-    this.record("sendCosmos", [from, messages, opts]);
-    return this.outcome("cosmos");
+  async cosmosTx(hash: string, timeoutMs: number) {
+    this.record("cosmosTx", [hash, timeoutMs]);
+    return this.state.cosmosTxs[hash.toUpperCase()];
   }
   async sendEvm(from: LiveRole, tx: EvmTxRequest, opts: BroadcastOptions) {
     this.record("sendEvm", [from, tx, opts]);
-    return this.outcome("evm");
+    return this.outcome();
   }
 
-  private outcome(lane: "cosmos" | "evm"): BroadcastOutcome {
+  private outcome(): BroadcastOutcome {
+    const lane = "evm" as const;
     this.sent += 1;
-    const n = this.sent.toString(16).padStart(64, "0");
-    const hash = lane === "cosmos" ? n.toUpperCase() : `0x${n}`;
+    const hash = `0x${this.sent.toString(16).padStart(64, "0")}`;
     const next = this.state.outcomes.shift() ?? "success";
     const spec = typeof next === "string" ? { mode: next } : next;
     if (spec.mode === "success") return { status: "success", lane, hash };
@@ -178,4 +161,34 @@ export function defaultEthCall(req: EthCallRequest): EthCallResult {
   const [pubkey, signature, message] = args as [Hex, Hex, Hex];
   const ok = verifyMessage(pubkey, signature, hexToBytes(message));
   return { status: "success", data: encodeFunctionResult({ abi: PQC_VERIFY_ABI, functionName: "pqcVerify", result: ok }) };
+}
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const ZERO_HASH = `0x${"0".repeat(64)}` as Hex;
+
+/** FlightEscrow.mandateOf(owner, agent) answered from `mandates`. */
+export function mandateOfCall(mandates: Record<string, FakeMandate>, req: EthCallRequest): EthCallResult {
+  const { args } = decodeFunctionData({ abi: FLIGHT_ESCROW_ABI, data: req.data });
+  const [owner, agent] = args as unknown as [Hex, Hex];
+  const m = mandates[`${owner.toLowerCase()}/${agent.toLowerCase()}`];
+  const result = {
+    exists: !!m,
+    revoked: m?.revoked ?? false,
+    ticketsUsed: m?.ticketsUsed ?? 0,
+    budget: m?.budgetWei ?? BigInt(0),
+    mandate: {
+      merchant: ZERO_ADDRESS as Hex,
+      maxFareWei: m?.maxFareWei ?? BigInt(0),
+      maxTickets: m?.maxTickets ?? 0,
+      expiresAt: m?.expiresAt ?? BigInt(0),
+      origin: "0x000000" as Hex,
+      destination: "0x000000" as Hex,
+      departFrom: 0,
+      departTo: 0,
+      cabin: 0,
+      refundableOnly: false,
+      mandateHash: m?.mandateHash ?? ZERO_HASH,
+    },
+  };
+  return { status: "success", data: encodeFunctionResult({ abi: FLIGHT_ESCROW_ABI, functionName: "mandateOf", result }) };
 }

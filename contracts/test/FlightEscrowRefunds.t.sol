@@ -17,6 +17,7 @@ contract FlightEscrowRefundsTest is Test {
     address stranger = makeAddr("stranger");
 
     bytes merchantPubkey;
+    uint256 constant BUDGET = 5 ether;
     FlightEscrow escrow;
 
     function setUp() public {
@@ -29,9 +30,9 @@ contract FlightEscrowRefundsTest is Test {
         MockPqcKeyStatus(PQC_KEY_STATUS).setStatus(merchant, true, 1, merchantPubkey, true);
 
         escrow = new FlightEscrow();
-        vm.deal(agent, 10 ether);
+        vm.deal(owner, BUDGET);
         vm.prank(owner);
-        escrow.setMandate(agent, _mandate(2));
+        escrow.openMandate{value: BUDGET}(agent, _mandate(2), BUDGET);
     }
 
     // ------------------------------------------------------------------ cancel
@@ -46,9 +47,9 @@ contract FlightEscrowRefundsTest is Test {
         vm.prank(stranger);
         escrow.cancel(c, sig);
 
-        assertEq(owner.balance, 1 ether, "owner refunded");
+        assertEq(_budget(), BUDGET, "owner refunded to the budget");
         assertEq(stranger.balance, 0, "submitter gets nothing");
-        assertEq(address(escrow).balance, 0, "escrow emptied");
+        assertEq(escrow.totalHeld(), BUDGET, "nothing paid out; all back in the budget");
     }
 
     // ------------------------------------------------------------------ expiry
@@ -59,7 +60,7 @@ contract FlightEscrowRefundsTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.TicketDeadlineNotPassed.selector, bookingId));
         escrow.refund(bookingId);
-        assertEq(address(escrow).balance, 1 ether, "funds stay locked");
+        assertEq(_budget(), BUDGET - 1 ether, "funds stay locked");
     }
 
     function test_refund_oneSecondAfterDeadline_refundsOwnerAndEmitsExpired() public {
@@ -71,8 +72,8 @@ contract FlightEscrowRefundsTest is Test {
         vm.prank(stranger);
         escrow.refund(bookingId);
 
-        assertEq(owner.balance, 1 ether, "owner refunded");
-        assertEq(address(escrow).balance, 0, "escrow emptied");
+        assertEq(_budget(), BUDGET, "owner refunded to the budget");
+        assertEq(escrow.totalHeld(), BUDGET, "nothing paid out; all back in the budget");
     }
 
     function test_confirmTicket_revertsOneSecondAfterDeadline() public {
@@ -93,8 +94,22 @@ contract FlightEscrowRefundsTest is Test {
         vm.prank(agent);
         escrow.refund(bookingId);
 
-        assertEq(owner.balance, 1 ether, "owner refunded");
+        assertEq(_budget(), BUDGET, "owner refunded to the budget");
         assertEq(agent.balance, agentBefore, "agent gets nothing");
+    }
+
+    /// After the owner closed the mandate, a refund skips the budget and pays the owner directly.
+    function test_cancel_afterCloseMandate_paysTheOwnerDirectly() public {
+        bytes32 bookingId = _book(1);
+        vm.prank(owner);
+        escrow.closeMandate(agent);
+        assertEq(owner.balance, BUDGET - 1 ether, "close returned the unspent budget");
+
+        FlightEscrow.CancelProof memory c = _cancelProof(bookingId);
+        escrow.cancel(c, _signCancel(c));
+        assertEq(owner.balance, BUDGET, "the cancelled booking came back too");
+        assertEq(address(escrow).balance, 0, "escrow holds nothing");
+        assertEq(escrow.totalHeld(), 0);
     }
 
     function test_refund_revertsForUnknownBooking() public {
@@ -113,7 +128,7 @@ contract FlightEscrowRefundsTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.TicketQuotaExhausted.selector, 2));
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
+        escrow.book(q, sig);
     }
 
     function test_book_ticketedBookingsCountAgainstQuota() public {
@@ -126,20 +141,20 @@ contract FlightEscrowRefundsTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.TicketQuotaExhausted.selector, 2));
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
+        escrow.book(q, sig);
     }
 
     function test_book_quotaStaysExhaustedAfterOwnerResetsTheMandate() public {
         _book(1);
         _book(2);
         vm.prank(owner);
-        escrow.setMandate(agent, _mandate(2)); // same quota, fresh terms: the used count stays 2
+        escrow.openMandate(agent, _mandate(2), 0); // same quota, fresh terms: the used count stays 2
         FlightEscrow.Quote memory q = _quote(3);
         bytes memory sig = _allow(keccak256("QUOTE"), abi.encode(q), 0xA1);
 
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.TicketQuotaExhausted.selector, 2));
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
+        escrow.book(q, sig);
     }
 
     function test_book_worksAgainAfterCancelRestoresQuota() public {
@@ -149,7 +164,7 @@ contract FlightEscrowRefundsTest is Test {
         escrow.cancel(c, _signCancel(c));
 
         _book(3);
-        assertEq(address(escrow).balance, 2 ether, "two bookings locked");
+        assertEq(_budget(), BUDGET - 2 ether, "two bookings locked");
     }
 
     function test_book_worksAgainAfterExpiryRefundRestoresQuota() public {
@@ -159,7 +174,7 @@ contract FlightEscrowRefundsTest is Test {
         escrow.refund(first);
 
         _book(3);
-        assertEq(address(escrow).balance, 2 ether, "two bookings locked");
+        assertEq(_budget(), BUDGET - 2 ether, "two bookings locked");
     }
 
     // ------------------------------------------------------ single final state
@@ -177,7 +192,7 @@ contract FlightEscrowRefundsTest is Test {
         vm.warp(block.timestamp + TICKET_WINDOW + 1);
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.NotLocked.selector, bookingId));
         escrow.refund(bookingId);
-        assertEq(owner.balance, 0, "owner not refunded");
+        assertEq(_budget(), BUDGET - 1 ether, "owner not refunded");
     }
 
     function test_confirmTicketAndCancel_revertAfterCancel() public {
@@ -195,7 +210,7 @@ contract FlightEscrowRefundsTest is Test {
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.NotLocked.selector, bookingId));
         escrow.cancel(c, cancelSig);
         assertEq(merchant.balance, merchantBefore, "merchant not paid");
-        assertEq(owner.balance, 1 ether, "owner refunded once");
+        assertEq(_budget(), BUDGET, "owner refunded once");
     }
 
     function test_confirmTicketAndRefund_revertAfterExpiryRefund() public {
@@ -210,7 +225,7 @@ contract FlightEscrowRefundsTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.NotLocked.selector, bookingId));
         escrow.refund(bookingId);
-        assertEq(owner.balance, 1 ether, "owner refunded once");
+        assertEq(_budget(), BUDGET, "owner refunded once");
     }
 
     // ------------------------------------------------------------ type tags
@@ -223,7 +238,7 @@ contract FlightEscrowRefundsTest is Test {
 
         vm.expectRevert(FlightEscrow.InvalidSignature.selector);
         escrow.cancel(c, ticketTaggedSig);
-        assertEq(address(escrow).balance, 1 ether, "funds stay locked");
+        assertEq(_budget(), BUDGET - 1 ether, "funds stay locked");
     }
 
     function test_confirmTicket_revertsOnCancelProofSignature() public {
@@ -233,7 +248,7 @@ contract FlightEscrowRefundsTest is Test {
 
         vm.expectRevert(FlightEscrow.InvalidSignature.selector);
         escrow.confirmTicket(t, cancelTaggedSig);
-        assertEq(address(escrow).balance, 1 ether, "funds stay locked");
+        assertEq(_budget(), BUDGET - 1 ether, "funds stay locked");
     }
 
     function test_cancel_revertsOnWrongSignature() public {
@@ -247,11 +262,15 @@ contract FlightEscrowRefundsTest is Test {
 
     // ----------------------------------------------------------------- helpers
 
+    function _budget() internal view returns (uint256) {
+        return escrow.mandateOf(owner, agent).budget;
+    }
+
     function _book(uint256 offerSeed) internal returns (bytes32 bookingId) {
         FlightEscrow.Quote memory q = _quote(offerSeed);
         bytes memory sig = _allow(keccak256("QUOTE"), abi.encode(q), 0xA1);
         vm.prank(agent);
-        bookingId = escrow.book{value: q.priceWei}(q, sig);
+        bookingId = escrow.book(q, sig);
     }
 
     function _mandate(uint32 maxTickets) internal view returns (FlightEscrow.Mandate memory) {

@@ -5,7 +5,7 @@ export const STEP_META: Record<BookingStepKey, { title: string; actor: "merchant
   quote: { title: "Merchant signs the quote", actor: "merchant", msg: "ML-DSA-87" },
   verify: { title: "Contract verifies the signature", actor: "chain", msg: "pqcVerify 0x…0a01" },
   rules: { title: "Gate checks your mandate", actor: "gate" },
-  lock: { title: "Agent pays into escrow", actor: "agent", msg: "MsgExecuteEVM → FlightEscrow.book()" },
+  lock: { title: "Your budget pays into escrow", actor: "agent", msg: "FlyGate agent → FlightEscrow.book()" },
   order: { title: "Merchant books with Duffel", actor: "merchant", msg: "POST /air/orders" },
   ticket: { title: "Airline issues the ticket", actor: "merchant" },
   proof: { title: "Contract verifies the ticket proof", actor: "chain", msg: "FlightEscrow.confirmTicket()" },

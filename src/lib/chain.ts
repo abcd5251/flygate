@@ -6,7 +6,8 @@ import type { ChainTx, DemoMode, LiveAddresses, Mandate, Scenario, TxKind, TxSou
 /**
  * Browser-safe QoreChain (diana testnet) layer: constants, `shortAddr`, the simulation helpers
  * and the `ChainPort` interface the pages use for every on-chain step. Nothing here may touch
- * keys or `@qorechain/sdk`; live signing happens on the server (ADR-0001).
+ * keys or `@qorechain/sdk`. In Live mode the owner signs with their own QoreX wallet
+ * (src/lib/qorex.ts) and the server signs only as FlyGate's agent and the merchant (ADR-0003).
  */
 
 /** diana's EVM chain id. FlightEscrow's constructor refuses any other chain. */
@@ -70,21 +71,68 @@ export function sleep(ms: number) {
 
 export const STARTING_BALANCE_USD = 1000;
 
-/**
- * The owner transactions the wallet sends after the mandate is signed, in order. Simulated keeps
- * its original three; Live sends link (key + spending rule in one tx), the Scoped window, then
- * setMandate (D-12).
- */
-export type MandateTxStep = "link" | "spending" | "window" | "mandate";
-export const MANDATE_TX_STEPS: Record<DemoMode, MandateTxStep[]> = {
-  simulated: ["link", "spending", "window"],
-  live: ["link", "window", "mandate"],
-};
+/** The simulated owner transactions after the mandate is signed, in order. */
+export type MandateTxStep = "link" | "spending" | "window";
+export const SIMULATED_MANDATE_STEPS: MandateTxStep[] = ["link", "spending", "window"];
 
 export type MandateChainInput = { step: MandateTxStep; mandate: Mandate; mandateHash?: string };
+
+/**
+ * Live: who acts and the proof that the caller set this mandate. `owner` is the owner's qor1
+ * address; `sessionKey` is the random key the owner's browser made when it set the mandate (its
+ * hash is part of the on-chain mandateHash). Never sent anywhere but FlyGate's own server.
+ */
+export type LiveSession = { owner: string; sessionKey: string };
+
 /** `bookingId` is the on-chain id fixed by the Live quote (absent in Simulated mode). */
-export type BookingChainInput = { offerId: string; amountUsd: number; bookingId?: string };
-export type QuoteInput = { offerId: string; scenario: Scenario; mandate: Mandate; mandateHash?: string };
+export type BookingChainInput = { offerId: string; amountUsd: number; bookingId?: string; session?: LiveSession };
+export type QuoteInput = { offerId: string; scenario: Scenario; mandate: Mandate; mandateHash?: string; session?: LiveSession };
+
+/** One message for the owner's wallet: type URL and protobuf bytes in base64 (QoreX signAndBroadcast). */
+export type WalletMessage = { typeUrl: string; value: string };
+/** A transaction for the owner's QoreX wallet to show, sign and broadcast. */
+export type WalletRequest = { chainId: string; messages: WalletMessage[]; gasLimit: number; memo: string };
+
+/** An owner address in both encodings (the same 20 bytes). */
+export type OwnerAddresses = { cosmos: string; evm: string };
+
+/**
+ * Live /mandate: what the owner's wallet signs. One tx: the deposit (a bank send into
+ * FlightEscrow) and openMandate. `depositQor` is what leaves the wallet now; `budgetQor` is the
+ * agent's budget after it lands.
+ */
+export type MandatePlan =
+  | {
+      ok: true;
+      request: WalletRequest;
+      mandateHash: string;
+      owner: OwnerAddresses;
+      agent: string;
+      escrow: string;
+      depositQor: string;
+      budgetQor: string;
+      ticketsUsed: number;
+    }
+  | { ok: false; code: string; reason: string };
+
+/** Live: the closeMandate tx for the owner's wallet (revoke the agent, withdraw the budget). */
+export type ClosePlan = { ok: true; request: WalletRequest; refundQor: string } | { ok: false; code: string; reason: string };
+
+/** The owner's mandate for FlyGate's agent, as FlightEscrow reports it. */
+export type OwnerMandate = {
+  revoked: boolean;
+  budgetQor: string;
+  ticketsUsed: number;
+  maxTickets: number;
+  mandateHash: string;
+  /** unix seconds */
+  expiresAt: number;
+};
+
+/** The owner's wallet balance and mandate on diana (Live read). */
+export type OwnerState =
+  | { ok: true; owner: OwnerAddresses; balanceQor: string; mandate?: OwnerMandate }
+  | { ok: false; code: string; reason: string };
 /** `pnr` is hashed into the TicketProof the merchant signs. */
 export type TicketInput = BookingChainInput & { pnr: string };
 
@@ -132,21 +180,21 @@ export type BookingStateResult =
 
 /**
  * The Booking fails refund. Live: `tx` is the merchant-signed cancel() the agent EOA submitted;
- * after it succeeds the server reads the refund address (the owner's EVM signer, ADR-0002) once:
+ * the price goes back to the owner's budget in FlightEscrow, which the server then reads once:
  * `readResult` / `balanceQor` ("Live read"), or `readError` when that read failed.
  */
 export type CancelResult = { tx: ChainTx; refundTo?: string; balanceQor?: string; readResult?: string; readError?: string };
 /** `bookingId` is the Live quote whose book() is simulated (absent in Simulated mode). */
-export type FareCapInput = { offerId: string; priceUsd: number; maxFareUsd: number; bookingId?: string };
+export type FareCapInput = { offerId: string; priceUsd: number; maxFareUsd: number; bookingId?: string; session?: LiveSession };
 
 /** Result of the backup on-chain fare-cap check, run after the off-chain gate rejected a quote. */
 export type FareCapCheck = {
   source: TxSource;
   /** A rejected tx (simulated). Live mode reads with eth_call instead and sends nothing. */
   tx?: ChainTx;
-  /** Live: the decoded `FareOverCap(maxFareWei, priceWei)` and the owner's balance before/after. */
+  /** Live: the decoded `FareOverCap(maxFareWei, priceWei)` and the owner's budget before/after. */
   readResult?: string;
-  /** Live: whether the contract refused with FareOverCap and the balance did not move. */
+  /** Live: whether the contract refused with FareOverCap and the budget did not move. */
   ok?: boolean;
   code?: string;
   detail?: string;
@@ -190,7 +238,6 @@ const SIMULATED_MANDATE_TXS: Record<MandateTxStep, readonly [label: string, msg:
   link: ["Link agent key", "MsgRegisterAuthenticator"],
   spending: ["Set spending rules", "MsgUpdateSpendingRules"],
   window: ["Open scoped window", "MsgOpenEVMWindow"],
-  mandate: ["Write mandate on-chain", "FlightEscrow.setMandate()"],
 };
 
 /** Simulated quotes by id, so verify checks the payload that was signed. */
@@ -297,25 +344,27 @@ async function postLive<T>(path: string, body: unknown, failed: (reason: string,
 }
 
 /**
- * Live mode: every on-chain step is a fetch to /api/live/*, where the server signs and sends to
- * diana (ADR-0001). The browser never sees keys or the SDK, only public results. /checkout
- * steps send only ids (offerId, scenario, bookingId, pnr) and the mandate (D-08).
+ * Live mode: every agent and merchant step is a fetch to /api/live/*, where the server signs as
+ * FlyGate's agent or the merchant and sends to diana. The owner signs with their own QoreX wallet
+ * (`liveOwner`, src/lib/qorex.ts): the server never holds an owner key (ADR-0003). /checkout
+ * steps send only ids (offerId, scenario, bookingId, pnr), the mandate and the owner's session
+ * (D-08).
  */
 export const liveChain: ChainPort = {
-  async setupMandate({ step, mandate, mandateHash }) {
-    return postLive("/api/live/mandate", { step, mandate, mandateHash }, liveFailure);
+  async setupMandate() {
+    return liveFailure("A Live mandate is signed in your QoreX wallet, not by the server", "use wallet");
   },
-  async signQuote({ offerId, scenario, mandate }) {
-    return postLive<CheckoutQuote>("/api/live/checkout", { step: "quote", offerId, scenario, mandate }, (reason, code) => ({ ok: false, code, reason }));
+  async signQuote({ offerId, scenario, mandate, session }) {
+    return postLive<CheckoutQuote>("/api/live/checkout", { step: "quote", offerId, scenario, mandate, ...session }, (reason, code) => ({ ok: false, code, reason }));
   },
   async verifyQuote({ quoteId }) {
     return postLive<QuoteCheck>("/api/live/checkout", { step: "verify", bookingId: quoteId }, (reason, code) => ({ ok: false, detail: reason, code, source: "live" }));
   },
-  async lockFunds({ bookingId }) {
-    return postLive("/api/live/checkout", { step: "lock", bookingId }, liveFailure);
+  async lockFunds({ bookingId, session }) {
+    return postLive("/api/live/checkout", { step: "lock", bookingId, sessionKey: session?.sessionKey }, liveFailure);
   },
-  async confirmTicket({ bookingId, pnr }) {
-    return postLive<TicketProofResult>("/api/live/checkout", { step: "proof", bookingId, pnr }, (reason, code) => ({
+  async confirmTicket({ bookingId, pnr, session }) {
+    return postLive<TicketProofResult>("/api/live/checkout", { step: "proof", bookingId, pnr, sessionKey: session?.sessionKey }, (reason, code) => ({
       proof: liveFailure(reason, code),
       release: liveFailure(reason, code),
       verified: false,
@@ -324,8 +373,8 @@ export const liveChain: ChainPort = {
   async bookingState({ bookingId }) {
     return postLive<BookingStateResult>("/api/live/checkout", { step: "state", bookingId }, (reason, code) => ({ ok: false, source: "live", code, reason }));
   },
-  async cancelBooking({ bookingId }) {
-    return postLive<CancelResult>("/api/live/checkout", { step: "cancel", bookingId }, (reason, code) => ({ tx: liveFailure(reason, code) }));
+  async cancelBooking({ bookingId, session }) {
+    return postLive<CancelResult>("/api/live/checkout", { step: "cancel", bookingId, sessionKey: session?.sessionKey }, (reason, code) => ({ tx: liveFailure(reason, code) }));
   },
   async checkFareCap({ bookingId }) {
     return postLive<FareCapCheck>("/api/live/checkout", { step: "farecap", bookingId }, (reason, code) => ({ source: "live", ok: false, code, detail: reason }));
@@ -340,6 +389,28 @@ export const liveChain: ChainPort = {
     if (res.status === 404) return unavailable("LIVE_MODE is not on");
     if (!res.ok) return unavailable(`Live status failed (HTTP ${res.status})`);
     return (await res.json()) as ChainStatus;
+  },
+};
+
+/**
+ * Live, the owner's side: the server builds the transaction for the owner's QoreX wallet and
+ * checks on diana what the wallet sent. `controlHash` is keccak256 of the browser's session key.
+ */
+export const liveOwner = {
+  prepareMandate(input: { mandate: Mandate; owner: string; controlHash: string }) {
+    return postLive<MandatePlan>("/api/live/mandate", { action: "prepare", ...input }, (reason, code) => ({ ok: false, code, reason }));
+  },
+  confirmMandate(input: { mandate: Mandate; owner: string; controlHash: string; txHash: string }) {
+    return postLive<ChainTx>("/api/live/mandate", { action: "confirm", ...input }, liveFailure);
+  },
+  prepareClose(owner: string) {
+    return postLive<ClosePlan>("/api/live/mandate", { action: "close", owner }, (reason, code) => ({ ok: false, code, reason }));
+  },
+  confirmClose(owner: string, txHash: string) {
+    return postLive<ChainTx>("/api/live/mandate", { action: "closed", owner, txHash }, liveFailure);
+  },
+  state(owner: string) {
+    return postLive<OwnerState>("/api/live/mandate", { action: "state", owner }, (reason, code) => ({ ok: false, code, reason }));
   },
 };
 

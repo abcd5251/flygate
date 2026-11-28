@@ -13,6 +13,9 @@ contract FlightEscrowTest is Test {
     address agent = makeAddr("agent");
     address merchant = makeAddr("merchant");
 
+    /// What the owner deposits with the mandate: enough for two 1-ether bookings.
+    uint256 constant DEPOSIT = 2 ether;
+
     bytes merchantPubkey;
     FlightEscrow escrow;
 
@@ -26,7 +29,7 @@ contract FlightEscrowTest is Test {
         _setMerchantKey(true, 1, true);
 
         escrow = new FlightEscrow();
-        vm.deal(agent, 10 ether);
+        vm.deal(owner, 10 ether);
     }
 
     // ---------------------------------------------------------------- deploy
@@ -48,10 +51,11 @@ contract FlightEscrowTest is Test {
         vm.expectEmit(address(escrow));
         emit FlightEscrow.Booked(bookingId, agent, merchant, q.priceWei, uint64(block.timestamp + q.ticketWindow));
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, quoteSig);
+        escrow.book(q, quoteSig);
 
-        assertEq(address(escrow).balance, q.priceWei, "funds locked in escrow");
-        assertEq(agent.balance, 10 ether - q.priceWei, "agent paid");
+        assertEq(address(escrow).balance, DEPOSIT, "deposit stays in escrow");
+        assertEq(_budget(), DEPOSIT - q.priceWei, "price moved from the owner's budget into the booking");
+        assertEq(escrow.totalHeld(), DEPOSIT, "budget + locked booking are both held");
 
         FlightEscrow.TicketProof memory t = _ticket(bookingId);
         bytes memory ticketSig = _signTicket(t);
@@ -63,7 +67,8 @@ contract FlightEscrowTest is Test {
         escrow.confirmTicket(t, ticketSig);
 
         assertEq(merchant.balance - merchantBefore, q.priceWei, "merchant paid priceWei");
-        assertEq(address(escrow).balance, 0, "escrow emptied");
+        assertEq(address(escrow).balance, DEPOSIT - q.priceWei, "only the unspent budget is left");
+        assertEq(escrow.totalHeld(), DEPOSIT - q.priceWei, "held = unspent budget");
     }
 
     // ------------------------------------------------------------ signatures
@@ -76,8 +81,8 @@ contract FlightEscrowTest is Test {
 
         vm.expectRevert(FlightEscrow.InvalidSignature.selector);
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, forged);
-        assertEq(agent.balance, 10 ether, "agent keeps funds");
+        escrow.book(q, forged);
+        assertEq(_budget(), DEPOSIT, "budget untouched");
     }
 
     function test_book_revertsWhenSignedQuoteDiffersFromSubmitted() public {
@@ -88,7 +93,7 @@ contract FlightEscrowTest is Test {
 
         vm.expectRevert(FlightEscrow.InvalidSignature.selector);
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
+        escrow.book(q, sig);
     }
 
     function test_confirmTicket_revertsOnWrongSignature() public {
@@ -113,7 +118,7 @@ contract FlightEscrowTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.MerchantKeyPossessionUnproven.selector, merchant));
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
+        escrow.book(q, sig);
     }
 
     function test_book_revertsWhenMerchantKeyNotRegistered() public {
@@ -124,7 +129,7 @@ contract FlightEscrowTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.MerchantKeyNotRegistered.selector, merchant));
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
+        escrow.book(q, sig);
     }
 
     function test_book_revertsWhenMerchantKeyIsNotMlDsa87() public {
@@ -135,7 +140,7 @@ contract FlightEscrowTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.UnsupportedKeyAlgorithm.selector, 2));
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
+        escrow.book(q, sig);
     }
 
     // ----------------------------------------------------------- ticket window
@@ -159,19 +164,119 @@ contract FlightEscrowTest is Test {
         vm.warp(block.timestamp + _quote().ticketWindow + 1);
         vm.expectRevert(abi.encodeWithSelector(FlightEscrow.TicketDeadlinePassed.selector, bookingId));
         escrow.confirmTicket(t, sig);
-        assertEq(address(escrow).balance, 1 ether, "funds stay locked");
+        assertEq(address(escrow).balance, DEPOSIT, "funds stay locked");
     }
 
     // ------------------------------------------------------------- payment
 
-    function test_book_revertsWhenValueDiffersFromPrice() public {
+    function test_book_revertsWhenBudgetIsBelowPrice() public {
+        FlightEscrow.Quote memory q = _quote();
+        vm.prank(owner);
+        escrow.openMandate{value: q.priceWei - 1}(agent, _mandate(), q.priceWei - 1);
+        bytes memory sig = _signQuote(q);
+
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.InsufficientBudget.selector, q.priceWei - 1, q.priceWei));
+        vm.prank(agent);
+        escrow.book(q, sig);
+    }
+
+    /// A fare over the cap is refused as FareOverCap even when the budget is short too.
+    function test_book_reportsFareOverCapBeforeBudget() public {
+        FlightEscrow.Mandate memory m = _mandate();
+        m.maxFareWei = 0.5 ether;
+        vm.prank(owner);
+        escrow.openMandate{value: 0.5 ether}(agent, m, 0.5 ether);
+        FlightEscrow.Quote memory q = _quote(); // 1 ether
+        bytes memory sig = _signQuote(q);
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.FareOverCap.selector, 0.5 ether, 1 ether));
+        vm.prank(agent);
+        escrow.book(q, sig);
+    }
+
+    function test_book_isNotPayable_theAgentCannotFundABooking() public {
         FlightEscrow.Quote memory q = _quote();
         _setMandate();
         bytes memory sig = _signQuote(q);
-
-        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.WrongPayment.selector, q.priceWei, q.priceWei - 1));
+        vm.deal(agent, 1 ether);
         vm.prank(agent);
-        escrow.book{value: q.priceWei - 1}(q, sig);
+        (bool ok,) = address(escrow).call{value: 1 ether}(abi.encodeCall(FlightEscrow.book, (q, sig)));
+        assertFalse(ok, "book() refuses value");
+    }
+
+    // ------------------------------------------------------------- deposits
+
+    /// A QoreX account cannot send value through MsgCrossVMCall: its transaction is a bank send
+    /// to the contract followed by openMandate claiming it. Modeled here as a plain transfer.
+    function test_openMandate_claimsABankSendMadeJustBefore() public {
+        vm.deal(address(escrow), 3 ether); // the MsgSend landing first
+        vm.expectEmit(address(escrow));
+        emit FlightEscrow.Deposited(owner, agent, 3 ether);
+        vm.prank(owner);
+        escrow.openMandate(agent, _mandate(), 3 ether);
+        assertEq(_budget(), 3 ether);
+        assertEq(escrow.totalHeld(), 3 ether);
+    }
+
+    function test_openMandate_cannotClaimMoreThanArrived() public {
+        vm.deal(address(escrow), 1 ether);
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.DepositNotReceived.selector, 2 ether, 1 ether));
+        vm.prank(owner);
+        escrow.openMandate(agent, _mandate(), 2 ether);
+    }
+
+    function test_openMandate_cannotClaimSomeoneElsesBudget() public {
+        _setMandate(); // owner's 2 ether are held
+        address thief = makeAddr("thief");
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.DepositNotReceived.selector, 1, 0));
+        vm.prank(thief);
+        escrow.openMandate(agent, _mandate(), 1);
+    }
+
+    function test_openMandate_refusesValueAboveDeposit() public {
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.ValueExceedsDeposit.selector, 2 ether, 1 ether));
+        vm.prank(owner);
+        escrow.openMandate{value: 2 ether}(agent, _mandate(), 1 ether);
+    }
+
+    function test_openMandate_again_addsToTheBudget() public {
+        _setMandate();
+        vm.prank(owner);
+        escrow.openMandate{value: 1 ether}(agent, _mandate(), 1 ether);
+        assertEq(_budget(), DEPOSIT + 1 ether);
+    }
+
+    function test_withdraw_returnsUnspentBudgetToTheOwnerOnly() public {
+        _book(); // 1 of 2 ether locked
+        uint256 before = owner.balance;
+        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.InsufficientBudget.selector, 1 ether, 2 ether));
+        vm.prank(owner);
+        escrow.withdraw(agent, 2 ether);
+
+        vm.prank(owner);
+        escrow.withdraw(agent, 1 ether);
+        assertEq(owner.balance - before, 1 ether, "owner got the unspent part");
+        assertEq(_budget(), 0);
+        assertEq(escrow.totalHeld(), 1 ether, "the locked booking stays held");
+
+        vm.expectRevert(FlightEscrow.NoMandate.selector);
+        vm.prank(agent);
+        escrow.withdraw(agent, 0); // the agent has no mandate of its own to withdraw from
+    }
+
+    function test_closeMandate_revokesAndReturnsTheWholeBudget() public {
+        _setMandate();
+        uint256 before = owner.balance;
+        vm.prank(owner);
+        escrow.closeMandate(agent);
+        assertEq(owner.balance - before, DEPOSIT);
+        assertEq(address(escrow).balance, 0);
+        assertTrue(escrow.mandateOf(owner, agent).revoked);
+
+        FlightEscrow.Quote memory q = _quote();
+        bytes memory sig = _signQuote(q);
+        vm.expectRevert(FlightEscrow.MandateIsRevoked.selector);
+        vm.prank(agent);
+        escrow.book(q, sig);
     }
 
     function test_confirmTicket_revertsTheSecondTime() public {
@@ -191,7 +296,7 @@ contract FlightEscrowTest is Test {
         _setMandate();
         bytes memory sig = _signQuote(q);
         vm.prank(agent);
-        bookingId = escrow.book{value: q.priceWei}(q, sig);
+        bookingId = escrow.book(q, sig);
     }
 
     function _mandate() internal view returns (FlightEscrow.Mandate memory) {
@@ -237,7 +342,11 @@ contract FlightEscrowTest is Test {
 
     function _setMandate() internal {
         vm.prank(owner);
-        escrow.setMandate(agent, _mandate());
+        escrow.openMandate{value: DEPOSIT}(agent, _mandate(), DEPOSIT);
+    }
+
+    function _budget() internal view returns (uint256) {
+        return escrow.mandateOf(owner, agent).budget;
     }
 
     function _setMerchantKey(bool registered, uint8 algorithmId, bool possessionProven) internal {

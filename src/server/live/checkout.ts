@@ -1,7 +1,5 @@
 import "server-only";
-import { executeEvmMsg, evmAuthSignBytes, evmAuthSignBytesV2 } from "@qorechain/sdk";
-import { decodeErrorResult, decodeFunctionResult, hexToBytes, keccak256, stringToBytes } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { decodeFunctionResult, keccak256, stringToBytes } from "viem";
 import type { BookingStateResult, CancelResult, CheckoutQuote, FareCapCheck, QuoteCheck, TicketProofResult } from "@/lib/chain";
 import {
   bookingId as bookingIdOf,
@@ -24,24 +22,38 @@ import {
 import { usd } from "@/lib/mandate";
 import { DEMO_OFFERS, PRICE_CHANGE_USD } from "@/lib/offers";
 import type { Cabin, ChainTx, Mandate, Offer, Scenario } from "@/lib/types";
-import type { BroadcastOutcome, CosmosMsg, EthCallRequest, EvmAuthDigestVersion, Hex, ServerChain } from "./chain";
+import type { Hex, ServerChain } from "./chain";
 import { createCancelStep } from "./cancel";
-import type { BookLane, LiveConfig } from "./config";
+import type { LiveConfig } from "./config";
 import { fareCapCheck } from "./farecap";
 import type { LiveKeys } from "./keys";
-import { BadRequest, parseMandate, STEP_TIMEOUT_MS } from "./mandate";
+import {
+  BadRequest,
+  controlHashOf,
+  mandateHashOf,
+  parseMandate,
+  parseOwner,
+  parseSessionKey,
+  readMandate,
+  STEP_TIMEOUT_MS,
+  type MandateState,
+  type OwnerAccount,
+} from "./mandate";
 import { createBookingState } from "./recovery";
 import { formatQor, usdToUqor, WEI_PER_UQOR } from "./money";
 import { errorText, txFactory, type Clock, type StepResult, type TxText } from "./tx";
 
 /**
- * Live /checkout (#21, Ticketed): one server operation per booking step. `quote` signs an on-chain
- * Quote with the merchant's registered ML-DSA-87 key and fixes the bookingId; `verify` asks the
- * pqcVerify precompile (eth_call, "Live read"); `lock` sends book(); `proof` sends confirmTicket(),
- * whose `Released` event is the payout, so `release` reuses its hash. Later tickets add steps
- * here: Fare jumps' eth_call of book() (#22), cancel() (#23) and the booking-state query (#24).
+ * Live /checkout (#21, Ticketed): one server operation per booking step. `quote` checks that the
+ * caller set the owner's on-chain mandate (its session key), signs an on-chain Quote with the
+ * merchant's registered ML-DSA-87 key and fixes the bookingId; `verify` asks the pqcVerify
+ * precompile (eth_call, "Live read"); `lock` has FlyGate's agent send book(), which moves the
+ * price out of the owner's deposited budget into escrow; `proof` sends confirmTicket(), whose
+ * `Released` event is the payout, so `release` reuses its hash. Fare jumps' eth_call of book()
+ * (#22), cancel() (#23) and the booking-state query (#24) are steps here too.
  *
- * Every broadcast is idempotent per (step, bookingId) (D-28) and never retried.
+ * Every broadcast is idempotent per (step, bookingId) (D-28) and never retried, and needs the
+ * session key of the mandate the booking was quoted under.
  */
 export const CHECKOUT_STEPS = ["quote", "verify", "lock", "proof", "farecap", "cancel", "state"] as const;
 export type CheckoutStep = (typeof CHECKOUT_STEPS)[number];
@@ -50,13 +62,6 @@ export type CheckoutStep = (typeof CHECKOUT_STEPS)[number];
 export const QUOTE_TTL_SECONDS = 20 * 60;
 /** Seconds the merchant has to confirm the ticket after book() (D-15). */
 export const TICKET_WINDOW_SECONDS = 600;
-/**
- * MsgExecuteEVM gas limit for book(). The chain runs the call with exactly this limit; book()
- * verifies an ML-DSA-87 signature through the precompile, so it is generous. An assumption until
- * the B-stage run measures it. The tx carrying it gets this much gas on top of its estimate
- * (`extraGas`), or the chain refuses it as under-provisioned.
- */
-export const BOOK_GAS_LIMIT = BigInt(2_000_000);
 
 const SCENARIOS: readonly Scenario[] = ["normal", "price_change", "order_fail"];
 const CABINS: Record<Cabin, EscrowCabin> = { economy: EscrowCabin.Economy, premium: EscrowCabin.PremiumEconomy, business: EscrowCabin.Business };
@@ -66,6 +71,10 @@ const PNR_RE = /^[A-Z0-9]{5,8}$/;
 /** POST /api/live/checkout body: structured fields only; the server builds every tx (D-08). */
 export interface CheckoutInput {
   step: unknown;
+  /** The owner's qor1 address (quote). */
+  owner?: unknown;
+  /** The session key the owner's browser set the mandate with (every step but verify and state). */
+  sessionKey?: unknown;
   offerId?: unknown;
   scenario?: unknown;
   mandate?: unknown;
@@ -105,19 +114,15 @@ export function scenarioPriceUsd(offer: Offer, scenario: Scenario): number {
   return scenario === "price_change" ? PRICE_CHANGE_USD : offer.priceUsd;
 }
 
-/** Who calls book(), so the quote's `agent` and the mandate's key: msg.sender on that lane. */
-export function bookSender(lane: BookLane, keys: LiveKeys): Hex {
-  return lane === "eoa" ? keys.roles.agent.signer.address : keys.roles.owner.account.evm;
-}
-
 /** A demo offer as FlightEscrow's Quote (D-15). Cities are the mandate's city codes. */
 export function demoQuote(o: {
   offer: Offer;
   priceUsd: number;
   mandate: Mandate;
   merchant: Hex;
+  /** FlyGate's agent: book()'s msg.sender. */
   agent: Hex;
-  /** Who set the mandate (the setMandate sender, D-10); book() runs under mandates[owner][agent] and refunds go here. */
+  /** The owner whose mandate and budget the booking runs under; refunds go back to it. */
   owner: Hex;
   uqorPerUsd: bigint;
   nowMs: number;
@@ -143,58 +148,6 @@ const qorNumber = (uqor: bigint) => formatQor(uqor).replace(/ QOR$/, "");
 const sigPreview = (sig: Hex) => `${sig.slice(0, 42)}…`;
 const sigBytes = (sig: Hex) => (sig.length - 2) / 2;
 
-/**
- * book() as a MsgExecuteEVM through the Linked agent key (D-09): the agent key signs the
- * `evmAuthSignBytesV2` digest (EIP-191, as MetaMask would), the agent's qor1 relays and pays the
- * fee, and the call runs from the owner account's 0x address with the owner's QOR as msg.value.
- */
-export async function bookExecuteMsg(o: {
-  chainId: string;
-  owner: string;
-  relayer: string;
-  agentSigner: { address: Hex; privateKey: Hex };
-  escrow: Hex;
-  data: Hex;
-  valueWei: bigint;
-  nonce: bigint;
-  digestVersion: EvmAuthDigestVersion;
-}): Promise<CosmosMsg> {
-  const pubkey = hexToBytes(o.agentSigner.address);
-  const fields = { chainId: o.chainId, account: o.owner, pubkey, to: o.escrow, value: o.valueWei.toString(), data: hexToBytes(o.data), nonce: o.nonce };
-  const digest = o.digestVersion === "v2" ? evmAuthSignBytesV2({ ...fields, gasLimit: BOOK_GAS_LIMIT }) : evmAuthSignBytes(fields);
-  const signature = await privateKeyToAccount(o.agentSigner.privateKey).signMessage({ message: { raw: digest } });
-  return executeEvmMsg({
-    relayer: o.relayer,
-    account: o.owner,
-    scheme: "secp256k1",
-    pubkey,
-    signature: hexToBytes(signature),
-    to: o.escrow,
-    value: o.valueWei.toString(),
-    data: hexToBytes(o.data),
-    gasLimit: BOOK_GAS_LIMIT,
-    nonce: o.nonce,
-  });
-}
-
-/**
- * A failed authenticator execution only says "evm transaction execution failed". Replaying the
- * same call with eth_call (state is unchanged, since it reverted) names FlightEscrow's error,
- * e.g. `TicketQuotaExhausted(1)`. Sends nothing; when the replay names nothing, the chain's
- * reason stays.
- */
-export async function withRevertName(chain: ServerChain, outcome: BroadcastOutcome, call: EthCallRequest): Promise<BroadcastOutcome> {
-  if (outcome.status !== "reverted" || outcome.code !== "execution failed") return outcome;
-  try {
-    const r = await chain.ethCall(call);
-    if (r.status !== "reverted") return outcome;
-    const e = decodeErrorResult({ abi: FLIGHT_ESCROW_ABI, data: r.data });
-    return { ...outcome, reason: `${e.errorName}(${(e.args ?? []).map(String).join(", ")}) · ${outcome.reason}` };
-  } catch {
-    return outcome;
-  }
-}
-
 // ------------------------------------------------------------------ the service part
 
 export interface CheckoutDeps {
@@ -211,9 +164,22 @@ interface QuotedBooking {
   quote: Quote;
   signature: Hex;
   domain: Domain;
-  lane: BookLane;
+  owner: OwnerAccount;
+  /** keccak256 of the session key the booking was quoted with; later steps must present that key. */
+  controlHash: Hex;
   priceUsd: number;
   priceUqor: bigint;
+}
+
+/** Why a caller may not act under an owner's mandate, or undefined when it may. */
+export function mandateRefusal(state: MandateState, expectedHash: Hex, nowMs: number): { code: string; reason: string } | undefined {
+  if (!state.exists) return { code: "no mandate", reason: "This account has no mandate for FlyGate's agent; sign one on /mandate first" };
+  if (state.revoked) return { code: "mandate revoked", reason: "The owner closed this mandate; sign a new one on /mandate" };
+  if (state.mandateHash.toLowerCase() !== expectedHash.toLowerCase()) {
+    return { code: "not your session", reason: "The on-chain mandate was not set with this browser's session (or the rules changed); sign the mandate again here" };
+  }
+  if (Number(state.expiresAt) * 1000 < nowMs) return { code: "mandate expired", reason: "The mandate has expired; sign a new one on /mandate" };
+  return undefined;
 }
 
 /** One cached step: whether it broadcast, and the response the client got. */
@@ -250,17 +216,30 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
     const offer = parseOffer(input.offerId);
     const scenario = parseScenario(input.scenario);
     const mandate = parseMandate(input.mandate);
+    const owner = parseOwner(input.owner);
+    const controlHash = controlHashOf(parseSessionKey(input.sessionKey));
     const live = await liveEscrow();
     if (!("escrow" in live)) return refusedQuote(live.code, live.reason);
     const k = await keys();
+    const agent = k.roles.agent.signer.address;
+    // Only the browser that set the owner's on-chain mandate may make the agent book under it.
+    let state: MandateState;
+    try {
+      state = await readMandate(chain, live.escrow, owner.evm, agent);
+    } catch (err) {
+      return refusedQuote("rpc error", `Could not read the owner's mandate: ${errorText(err)}`);
+    }
+    const refusal = mandateRefusal(state, mandateHashOf({ mandate, owner: owner.evm, agent, controlHash }), clock.now());
+    if (refusal) return refusedQuote(refusal.code, refusal.reason);
+
     const priceUsd = scenarioPriceUsd(offer, scenario);
     const q = demoQuote({
       offer,
       priceUsd,
       mandate,
       merchant: k.roles.merchant.account.evm,
-      agent: bookSender(config.lane, k),
-      owner: k.roles.owner.signer.address,
+      agent,
+      owner: owner.evm,
       uqorPerUsd: config.uqorPerUsd,
       nowMs: clock.now(),
     });
@@ -273,8 +252,17 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
     const signature = signMessage(quoteMessage(q, domain), k.merchantPqc.secretKey);
     const id = bookingIdOf(q);
     const priceUqor = usdToUqor(priceUsd, config.uqorPerUsd);
-    quotes.set(id, { quote: q, signature, domain, lane: config.lane, priceUsd, priceUqor });
+    quotes.set(id, { quote: q, signature, domain, owner, controlHash, priceUsd, priceUqor });
     return { ok: true, quoteId: id, bookingId: id, priceUsd, priceQor: qorNumber(priceUqor), sigBytes: sigBytes(signature), sigPreview: sigPreview(signature), source: "live" };
+  }
+
+  /** The quoted booking, when the caller presents the session key it was quoted with. */
+  function sessionBooking(input: CheckoutInput, id: Hex): { b?: QuotedBooking; refusal?: { code: string; reason: string } } {
+    const b = quotes.get(id);
+    if (!b) return { refusal: { code: "unknown booking", reason: "The server has no quote for this booking; nothing was sent" } };
+    const key = parseSessionKey(input.sessionKey);
+    if (controlHashOf(key) !== b.controlHash) return { b, refusal: { code: "not your session", reason: "This booking was quoted for another session; nothing was sent" } };
+    return { b };
   }
 
   async function verify(input: CheckoutInput): Promise<QuoteCheck> {
@@ -297,55 +285,24 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
   }
 
   function lockText(b: QuotedBooking): TxText {
-    return {
-      label: `Escrow ${usd(b.priceUsd)} (≈ ${formatQor(b.priceUqor)})`,
-      msg: b.lane === "eoa" ? "agent EOA → FlightEscrow.book()" : "MsgExecuteEVM → FlightEscrow.book()",
-    };
+    return { label: `Escrow ${usd(b.priceUsd)} (≈ ${formatQor(b.priceUqor)}) from your budget`, msg: "FlyGate agent → FlightEscrow.book()" };
   }
 
   async function lock(input: CheckoutInput): Promise<ChainTx> {
     const id = parseBookingId(input.bookingId);
     const unknown = { label: "Escrow payment", msg: "FlightEscrow.book()" };
-    const b = quotes.get(id);
+    const { b, refusal } = sessionBooking(input, id);
     const asCached = (r: StepResult): Cached => ({ broadcast: r.broadcast, response: r.tx, ok: r.tx.ok });
+    if (refusal) return tx.refused("agent", b ? lockText(b) : unknown, refusal.code, refusal.reason).tx;
     const run = async (): Promise<Cached> => {
-      if (!b) return asCached(tx.refused("agent", unknown, "unknown booking", "The server has no quote for this booking; nothing was sent"));
-      const text = lockText(b);
+      const text = lockText(b!);
       const live = await liveEscrow();
       if (!("escrow" in live)) return asCached(tx.refused("agent", text, live.code, live.reason));
-      const k = await keys();
-      const data = encodeBook(b.quote, b.signature);
-      const opts = { timeoutMs: STEP_TIMEOUT_MS };
-      if (b.lane === "eoa") {
-        return asCached(tx.fromOutcome("agent", text, await chain.sendEvm("agent", { to: b.domain.escrow, data, value: b.quote.priceWei, errorAbi: FLIGHT_ESCROW_ABI }, opts)));
-      }
-      const owner = k.roles.owner.account.cosmos;
-      const agentSigner = k.roles.agent.signer;
-      let nonce: bigint;
-      let digestVersion: EvmAuthDigestVersion;
-      try {
-        nonce = await chain.authNonce(owner, agentSigner.address);
-        digestVersion = await chain.evmAuthDigestVersion();
-      } catch (err) {
-        return asCached(tx.refused("agent", text, "rpc error", `Could not read the agent key's nonce or digest version (${errorText(err)}); nothing was sent`));
-      }
-      const msg = await bookExecuteMsg({
-        chainId: config.network.chainId,
-        owner,
-        relayer: k.roles.agent.account.cosmos,
-        agentSigner,
-        escrow: b.domain.escrow,
-        data,
-        valueWei: b.quote.priceWei,
-        nonce,
-        digestVersion,
-      });
-      // Code 0 can still be a failed execution: the chain checks the execution results (D-09).
-      const outcome = await chain.sendCosmos("agent", [msg], { ...opts, authenticatorExecutions: true, extraGas: Number(BOOK_GAS_LIMIT) });
-      const named = await withRevertName(chain, outcome, { to: b.domain.escrow, data, from: k.roles.owner.account.evm, value: b.quote.priceWei });
-      return asCached(tx.fromOutcome("agent", text, named));
+      // FlyGate's agent sends book() and pays its gas; the price comes out of the owner's budget.
+      const data = encodeBook(b!.quote, b!.signature);
+      return asCached(tx.fromOutcome("agent", text, await chain.sendEvm("agent", { to: b!.domain.escrow, data, errorAbi: FLIGHT_ESCROW_ABI }, { timeoutMs: STEP_TIMEOUT_MS })));
     };
-    return (await once("lock", id, run, (err) => ({ broadcast: true, ok: false, response: tx.refused("agent", b ? lockText(b) : unknown, "internal error", errorText(err)).tx }))) as ChainTx;
+    return (await once("lock", id, run, (err) => ({ broadcast: true, ok: false, response: tx.refused("agent", lockText(b!), "internal error", errorText(err)).tx }))) as ChainTx;
   }
 
   const PROOF_TEXT: TxText = { label: "Ticket proof on-chain", msg: "FlightEscrow.confirmTicket() · submitted by agent" };
@@ -364,8 +321,9 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
       const t = tx.refused("merchant", PROOF_TEXT, code, reason).tx;
       return { broadcast: false, ok: false, response: withRelease(t) };
     };
+    const { b, refusal } = sessionBooking(input, id);
+    if (refusal) return refused(refusal.code, refusal.reason).response as TicketProofResult;
     const run = async (): Promise<Cached> => {
-      const b = quotes.get(id);
       if (!b) return refused("unknown booking", "The server has no quote for this booking; nothing was sent");
       const locked = done.get(`lock:${id}`);
       if (!locked || !(await locked).ok) return refused("out of order", "book() has not succeeded for this booking; nothing was sent");
@@ -387,6 +345,7 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
     tx,
     keys,
     booking: (id) => quotes.get(id),
+    budget: async (b) => (await readMandate(chain, b.domain.escrow, b.owner.evm, (await keys()).roles.agent.signer.address)).budgetWei,
     locked: async (id) => {
       const l = done.get(`lock:${id}`);
       return !!l && (await l).ok;
@@ -394,6 +353,8 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
   });
   async function cancel(input: CheckoutInput): Promise<CancelResult> {
     const id = parseBookingId(input.bookingId);
+    const { refusal } = sessionBooking(input, id);
+    if (refusal) return cancelStep.refused(id, refusal.code, refusal.reason).response;
     return (await once("cancel", id, () => cancelStep.run(id), (err) => cancelStep.onError(id, err))) as CancelResult;
   }
 
@@ -402,7 +363,6 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
     chain,
     explorer: config.network.explorer,
     deployBlock: config.deployBlock,
-    executor: async () => (config.lane === "authenticator" ? (await keys()).roles.owner.account.cosmos : undefined),
     liveEscrow,
     async settle(id) {
       const pending = [...done].filter(([key]) => key.endsWith(`:${id}`)).map(([, p]) => p);
@@ -429,7 +389,7 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
         // Fare jumps (#22): eth_call of book() with the quoted booking; never broadcasts.
         const b = quotes.get(parseBookingId(input.bookingId));
         if (!b) return { source: "live", ok: false, code: "unknown booking", detail: "The server has no quote for this booking; nothing was checked" } satisfies FareCapCheck;
-        return fareCapCheck({ chain, keys, sender: bookSender }, b);
+        return fareCapCheck({ chain, keys }, b);
       }
       case "cancel":
         return cancel(input);

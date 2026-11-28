@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { sleep } from "./chain";
+import { sleep, type LiveSession } from "./chain";
 import { defaultMandate, defaultPassenger } from "./mandate";
 import type {
   AgentRun,
@@ -20,6 +20,8 @@ import type {
 export type DemoState = {
   /** Simulated or Live (diana) on-chain steps. Defaults to simulated; Reset demo keeps it. */
   mode: DemoMode;
+  /** Live: the qor1 account of the connected QoreX wallet. Reset demo keeps it. */
+  wallet?: string;
   scenario: Scenario;
   speed: 1 | 2;
   draft: Mandate;
@@ -140,7 +142,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   const wait = useCallback((ms: number) => sleep(ms / ref.current.speed), []);
   const addTx = useCallback((tx: ChainTx) => update((s) => ({ ...s, txs: [tx, ...s.txs].slice(0, 40) })), [update]);
   const reset = useCallback(() => {
-    const fresh = { ...initialState(), mode: ref.current.mode };
+    const fresh = { ...initialState(), mode: ref.current.mode, wallet: ref.current.wallet };
     ref.current = fresh;
     setState(fresh);
   }, []);
@@ -156,4 +158,10 @@ export function useDemo() {
   const ctx = useContext(DemoContext);
   if (!ctx) throw new Error("useDemo must be used inside DemoProvider");
   return ctx;
+}
+
+/** Live: the owner session the current mandate was signed with, for checkout requests. */
+export function liveSession(s: DemoState): LiveSession | undefined {
+  const live = s.signed?.mode === "live" ? s.signed.live : undefined;
+  return live ? { owner: live.owner, sessionKey: live.sessionKey } : undefined;
 }

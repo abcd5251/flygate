@@ -1,34 +1,38 @@
 import "server-only";
-import { linkAuthenticatorMsgs, openEvmWindowMsg, signAuthenticatorLinkEip191 } from "@qorechain/sdk";
-import { hexToBytes, pad } from "viem";
-import { bookingIdOfBook, Cabin as EscrowCabin, encodeSetMandate, EVENT_TOPICS, SELECTORS, unixDay, type OnchainMandate } from "@/lib/escrow";
-import { PLACES } from "@/lib/mandate";
+import { bech32ToHex, isValidBech32, msg as composers, qoreAddresses, qorechainRegistry } from "@qorechain/sdk";
+import { decodeFunctionResult, hexToBytes, keccak256, stringToBytes } from "viem";
+import { Cabin as EscrowCabin, encodeCloseMandate, encodeMandateOf, encodeOpenMandate, FLIGHT_ESCROW_ABI, unixDay, type OnchainMandate } from "@/lib/escrow";
+import type { WalletMessage } from "@/lib/chain";
+import { canonicalJson, PLACES } from "@/lib/mandate";
 import type { Cabin, Mandate } from "@/lib/types";
-import type { CosmosMsg, ExecutedEvmCall, Hex, ServerChain } from "./chain";
-import { MAX_FEE_UQOR, usdToUqor, WEI_PER_UQOR } from "./money";
+import type { Hex, ServerChain } from "./chain";
+import { usdToUqor, WEI_PER_UQOR } from "./money";
 
 /**
- * The three owner transactions of a Live /mandate, in their fixed order (D-12): link the agent
- * key with its spending rule (Cosmos), open the Scoped window on the owner account (Cosmos), then
- * setMandate (EVM) from the owner's coin-60 signer, which needs its own EVM window (`sendEvm`
- * opens it).
+ * The owner's side of Live (ADR-0003). The owner signs with their own QoreX wallet; the server
+ * never holds an owner key. It builds the messages the wallet signs, and reads back from
+ * FlightEscrow what the wallet did. A request that acts for an owner carries the session key
+ * the owner's browser generated: its hash is part of the on-chain mandateHash, so only the
+ * browser that set the mandate can make the agent book under it.
  */
-export const LIVE_MANDATE_STEPS = ["link", "window", "mandate"] as const;
-export type LiveMandateStep = (typeof LIVE_MANDATE_STEPS)[number];
 
 /** Longest wait for one Live step (D-30). */
 export const STEP_TIMEOUT_MS = 30_000;
-/** A Scoped window stays open at most ~1 hour (D-12). */
-export const WINDOW_MAX_BLOCKS = 3_600;
-/** diana makes a block about every second (docs/FLOW.md); used to turn time into blocks. */
-export const BLOCK_SECONDS = 1;
-export const SPENDING_RULE_ID = "flygate-live";
+/** Longest wait for the owner's wallet tx to be included after the wallet returned its hash. */
+export const WALLET_TX_TIMEOUT_MS = 60_000;
+/**
+ * Gas the wallet tx asks for: a bank send plus a MsgCrossVMCall running openMandate. Measured on
+ * diana with `pnpm live:e2e-wallet` (it prints the gas used); QoreX accepts 100k to 5M.
+ */
+export const OPEN_MANDATE_GAS = 1_000_000;
+export const CLOSE_MANDATE_GAS = 600_000;
 
 /** A request the server refuses to act on (HTTP 400). Never reaches the chain. */
 export class BadRequest extends Error {}
 
 const CABINS: Record<Cabin, EscrowCabin> = { economy: EscrowCabin.Economy, premium: EscrowCabin.PremiumEconomy, business: EscrowCabin.Business };
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const BYTES32_RE = /^0x[0-9a-fA-F]{64}$/;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -81,82 +85,48 @@ export function parseMandate(raw: unknown): Mandate {
   return m;
 }
 
-export function parseMandateHash(raw: unknown): Hex {
-  if (typeof raw !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(raw)) throw new BadRequest("mandateHash must be a 32-byte 0x hash");
+/** The owner's account: the qor1 address QoreX reports, and the same 20 bytes as EVM sees them. */
+export interface OwnerAccount {
+  cosmos: string;
+  /** msg.sender of the owner's MsgCrossVMCall, and where withdrawals and late refunds go. */
+  evm: Hex;
+}
+
+export function parseOwner(raw: unknown): OwnerAccount {
+  if (typeof raw !== "string" || !isValidBech32(raw, "qor")) throw new BadRequest("owner must be a qor1… address");
+  const cosmos = raw.toLowerCase();
+  return { cosmos, evm: qoreAddresses({ hex: bech32ToHex(cosmos) }).evm as Hex };
+}
+
+/** A 32-byte 0x value from the request (session key or its hash). */
+function parseBytes32(raw: unknown, name: string): Hex {
+  if (typeof raw !== "string" || !BYTES32_RE.test(raw)) throw new BadRequest(`${name} must be a 32-byte 0x value`);
   return raw.toLowerCase() as Hex;
 }
 
-/** The chain limits a mandate becomes (D-12, D-13, D-14). Amounts in uqor. */
-export interface MandateLimits {
-  perTxLimit: bigint;
-  dailyLimit: bigint;
-  windowMaxValue: bigint;
-  windowBlocks: number;
-  expiryUnix: number;
+/** The hash the mandate commits to; the browser keeps the session key itself. */
+export const parseControlHash = (raw: unknown) => parseBytes32(raw, "controlHash");
+export const controlHashOf = (sessionKey: Hex): Hex => keccak256(sessionKey);
+export const parseSessionKey = (raw: unknown) => parseBytes32(raw, "sessionKey");
+
+/**
+ * The mandate's on-chain hash: the rules, who they bind (owner, agent) and the session key's
+ * hash, so the hash names exactly one owner-approved mandate and one browser session.
+ */
+export function mandateHashOf(o: { mandate: Mandate; owner: Hex; agent: Hex; controlHash: Hex }): Hex {
+  const doc = { v: "flygate-mandate/2", mandate: o.mandate, owner: o.owner.toLowerCase(), agent: o.agent.toLowerCase(), controlHash: o.controlHash };
+  return keccak256(stringToBytes(canonicalJson(doc)));
 }
 
-export function mandateLimits(m: Mandate, uqorPerUsd: bigint, nowMs: number): MandateLimits {
-  const perTxLimit = usdToUqor(m.maxFareUsd, uqorPerUsd);
-  const tickets = BigInt(m.maxTickets);
-  const expiryUnix = Math.floor(Date.parse(m.expiresAt) / 1000);
-  const secondsLeft = expiryUnix - Math.floor(nowMs / 1000);
-  return {
-    perTxLimit,
-    dailyLimit: perTxLimit * tickets,
-    windowMaxValue: (perTxLimit + MAX_FEE_UQOR) * tickets,
-    windowBlocks: Math.min(WINDOW_MAX_BLOCKS, Math.floor(secondsLeft / BLOCK_SECONDS)),
-    expiryUnix,
-  };
+/** What the owner deposits for a mandate: the fare cap for every ticket it allows, in uqor. */
+export function depositForUqor(m: Mandate, uqorPerUsd: bigint): bigint {
+  return usdToUqor(m.maxFareUsd, uqorPerUsd) * BigInt(m.maxTickets);
 }
 
-/** The one EVM call the spending rule allows: FlightEscrow.book() (never setMandate / revokeMandate). */
-export function bookOnlyCall(escrow: Hex): string {
-  return `${escrow.toLowerCase()}/${SELECTORS.book.toLowerCase()}`;
-}
-
-/** Step 1: [MsgUpdateSpendingRules, MsgRegisterAuthenticator], or just the rules when already linked. */
-export function linkMsgs(o: {
-  owner: string;
-  chainId: string;
-  agentSigner: { address: Hex; privateKey: Hex };
-  escrow: Hex;
-  limits: MandateLimits;
-  alreadyLinked: boolean;
-}): CosmosMsg[] {
-  const proof = signAuthenticatorLinkEip191({ chainId: o.chainId, account: o.owner, privateKey: o.agentSigner.privateKey });
-  const msgs = linkAuthenticatorMsgs({
-    owner: o.owner,
-    chainId: o.chainId,
-    scheme: "secp256k1",
-    pubkey: hexToBytes(o.agentSigner.address),
-    permissions: ["evm"],
-    expiryUnix: o.limits.expiryUnix,
-    label: "flygate-agent",
-    possessionProof: proof.possessionProof,
-    // The whole rule set, every time: MsgUpdateSpendingRules replaces it wholesale (D-13).
-    spendingRule: {
-      id: SPENDING_RULE_ID,
-      perTxLimit: o.limits.perTxLimit,
-      dailyLimit: o.limits.dailyLimit,
-      enabled: true,
-      allowedEvmCalls: [bookOnlyCall(o.escrow)],
-    },
-  });
-  return o.alreadyLinked ? msgs.filter((m) => !m.typeUrl.endsWith("MsgRegisterAuthenticator")) : msgs;
-}
-
-/** Step 2: the Scoped window on the owner account. */
-export function windowMsg(o: { owner: string; escrow: Hex; maxTickets: number; limits: MandateLimits }): CosmosMsg {
-  return openEvmWindowMsg({
-    sender: o.owner,
-    blocks: o.limits.windowBlocks,
-    maxTxs: o.maxTickets,
-    maxValue: o.limits.windowMaxValue.toString(),
-    allowedTargets: [o.escrow],
-  });
-}
-
-/** Step 3: the on-chain mandate (D-15), with `maxTickets` = used + mandate.maxTickets (D-29). */
+/**
+ * The on-chain mandate (D-15). `maxTickets` counts from the tickets already used, which the
+ * contract keeps across re-sets (D-29).
+ */
 export function onchainMandate(m: Mandate, o: { merchant: Hex; used: number; uqorPerUsd: bigint; mandateHash: Hex }): OnchainMandate {
   return {
     merchant: o.merchant,
@@ -173,39 +143,83 @@ export function onchainMandate(m: Mandate, o: { merchant: Hex; used: number; uqo
   };
 }
 
-export function setMandateData(agent: Hex, mandate: OnchainMandate): Hex {
-  return encodeSetMandate(agent, mandate);
+/** FlightEscrow.mandateOf(owner, agent), as the server uses it. */
+export interface MandateState {
+  exists: boolean;
+  revoked: boolean;
+  ticketsUsed: number;
+  budgetWei: bigint;
+  mandateHash: Hex;
+  maxFareWei: bigint;
+  maxTickets: number;
+  expiresAt: bigint;
+}
+
+/** Reads FlightEscrow.mandateOf with eth_call. Throws when the read fails; callers never guess. */
+export async function readMandate(chain: ServerChain, escrow: Hex, owner: Hex, agent: Hex): Promise<MandateState> {
+  const r = await chain.ethCall({ to: escrow, data: encodeMandateOf(owner, agent) });
+  if (r.status !== "success") throw new Error(`mandateOf reverted: ${r.reason}`);
+  const m = decodeFunctionResult({ abi: FLIGHT_ESCROW_ABI, functionName: "mandateOf", data: r.data });
+  return {
+    exists: m.exists,
+    revoked: m.revoked,
+    ticketsUsed: m.ticketsUsed,
+    budgetWei: m.budget,
+    mandateHash: m.mandate.mandateHash,
+    maxFareWei: m.mandate.maxFareWei,
+    maxTickets: m.mandate.maxTickets,
+    expiresAt: m.mandate.expiresAt,
+  };
+}
+
+const registry = qorechainRegistry();
+
+/** One message as QoreX's signAndBroadcast takes it: protobuf bytes, base64. */
+function walletMessage(m: { typeUrl: string; value: unknown }): WalletMessage {
+  return { typeUrl: m.typeUrl, value: Buffer.from(registry.encode(m as Parameters<typeof registry.encode>[0])).toString("base64") };
 }
 
 /**
- * Tickets the agent holds against its quota (D-29): the bookings it made since the deploy block,
- * minus those later `Refunded`. A book() sent as an EVM tx leaves a `Booked` log. One sent as a
- * MsgExecuteEVM through the linked agent key leaves none that eth_getLogs returns, so on that
- * lane the owner account's `executed` calls (ServerChain.executedEvmCalls) are decoded too.
- * Throws when the logs cannot be read; callers never guess.
+ * A MsgCrossVMCall from the owner's account into FlightEscrow. `sourceVm` is ignored by the chain
+ * (it derives the origin lane) but its ValidateBasic wants a VM other than the target.
  */
-export async function countUsedTickets(chain: ServerChain, escrow: Hex, fromBlock: bigint, agent: Hex, executed: ExecutedEvmCall[] = []): Promise<number> {
-  const booked = await chain.getLogs({ address: escrow, fromBlock, topics: [EVENT_TOPICS.Booked, null, pad(agent.toLowerCase() as Hex, { size: 32 })] });
-  const held = new Set(booked.map((l) => l.topics[1]?.toLowerCase()));
-  for (const call of executed) {
-    if (call.height < fromBlock || call.to.toLowerCase() !== escrow.toLowerCase() || !call.data.startsWith(SELECTORS.book)) continue;
-    held.add(bookingIdOfBook(call.data).toLowerCase());
+function escrowCall(owner: string, escrow: Hex, data: Hex): WalletMessage {
+  return walletMessage(
+    composers.crossvm.crossVmCall({
+      sender: owner,
+      sourceVm: "cosmwasm",
+      targetVm: "evm",
+      targetContract: escrow,
+      payload: hexToBytes(data),
+      // The EVM lane refuses funds here ("send them separately"): the deposit is a MsgSend.
+      funds: [],
+      async: false,
+    }),
+  );
+}
+
+/**
+ * The owner's one wallet tx for a mandate: a bank send of the deposit to FlightEscrow, then
+ * openMandate claiming it. Atomic: both land or neither does. No deposit, no send.
+ */
+export function openMandateMessages(o: { owner: OwnerAccount; escrow: Hex; agent: Hex; mandate: OnchainMandate; depositUqor: bigint }): WalletMessage[] {
+  const out: WalletMessage[] = [];
+  if (o.depositUqor > BigInt(0)) {
+    out.push(
+      walletMessage(
+        composers.bank.send({
+          fromAddress: o.owner.cosmos,
+          toAddress: qoreAddresses({ evm: o.escrow }).cosmos,
+          amount: [{ denom: "uqor", amount: o.depositUqor.toString() }],
+        }),
+      ),
+    );
   }
-  if (held.size === 0) return 0;
-  const refunded = await chain.getLogs({ address: escrow, fromBlock, topics: [EVENT_TOPICS.Refunded] });
-  for (const l of refunded) held.delete(l.topics[1]?.toLowerCase());
-  return held.size;
+  out.push(escrowCall(o.owner.cosmos, o.escrow, encodeOpenMandate(o.agent, o.mandate, o.depositUqor * WEI_PER_UQOR)));
+  return out;
 }
 
-/**
- * What the linked agent key already spent on the UTC day of `nowMs`, in uqor (D-13). The chain
- * counts a spending rule's daily limit per UTC calendar day and keeps the count when the rule is
- * replaced, so a new round's dailyLimit is this plus its own budget. The rule counts each
- * execution's outflow, which for book() is its msg.value.
- */
-export function spentTodayUqor(executed: ExecutedEvmCall[], nowMs: number): bigint {
-  const dayStart = Math.floor(nowMs / 86_400_000) * 86_400;
-  return executed
-    .filter((c) => c.timeUnix >= dayStart && c.timeUnix < dayStart + 86_400)
-    .reduce((sum, c) => sum + c.valueWei / WEI_PER_UQOR, BigInt(0));
+/** The owner's wallet tx that revokes the agent and returns the whole unspent budget. */
+export function closeMandateMessages(o: { owner: OwnerAccount; escrow: Hex; agent: Hex }): WalletMessage[] {
+  return [escrowCall(o.owner.cosmos, o.escrow, encodeCloseMandate(o.agent))];
 }

@@ -29,6 +29,15 @@
         "block": 10664403,
         "url": "https://explore.qore.network/tx/42A7A3A1101F815A20F1BDF150118BED03EBD6F3D4536A609BEFD787E5F30A26"
       }
+    },
+    {
+      "label": "agent account -> agent EVM signer",
+      "amountUqor": "3426473",
+      "tx": {
+        "hash": "921072D8D8CF031A99E56584841B8CD7933E6339BD5C66C57DD8951E4ADB6877",
+        "block": 10902915,
+        "url": "https://explore.qore.network/tx/921072D8D8CF031A99E56584841B8CD7933E6339BD5C66C57DD8951E4ADB6877"
+      }
     }
   ],
   "pqcRegistrations": [
@@ -49,53 +58,7 @@
       }
     }
   ],
-  "flows": {
-    "confirm": {
-      "bookingId": "0x7fd4b02422123240b83e0d101597ca0a3af364efaff9b6b28e87d1973cefaa7b",
-      "book": {
-        "hash": "0x68557823256ccc7a0b01f8b7814de520ae66998574fec8df5a7d879c823e0a2c",
-        "block": 10664428,
-        "gasUsed": 351734,
-        "url": "https://explore.qore.network/tx/0x68557823256ccc7a0b01f8b7814de520ae66998574fec8df5a7d879c823e0a2c"
-      },
-      "confirmTicket": {
-        "hash": "0xe8050f43da7c493cd40d1dfcf468e5f0d20ee1960912c1ec6d9924790ba5e971",
-        "block": 10664430,
-        "gasUsed": 238661,
-        "url": "https://explore.qore.network/tx/0xe8050f43da7c493cd40d1dfcf468e5f0d20ee1960912c1ec6d9924790ba5e971"
-      }
-    },
-    "cancel": {
-      "bookingId": "0xd13d9f2d9824edfe76678bdcac43de54c6c3723c8ab2d837af253e46564a8e00",
-      "book": {
-        "hash": "0x1c3d97028798fdd7d1c59a2b4e618f175d2fe351b0fab2b8e7dc52835f491565",
-        "block": 10664432,
-        "gasUsed": 351950,
-        "url": "https://explore.qore.network/tx/0x1c3d97028798fdd7d1c59a2b4e618f175d2fe351b0fab2b8e7dc52835f491565"
-      },
-      "cancel": {
-        "hash": "0x830326a3215b838fcf00ffbdfbfe6a39a8f87d6613c10cfbfcfc208f9eb40717",
-        "block": 10664434,
-        "gasUsed": 243690,
-        "url": "https://explore.qore.network/tx/0x830326a3215b838fcf00ffbdfbfe6a39a8f87d6613c10cfbfcfc208f9eb40717"
-      }
-    },
-    "refund": {
-      "bookingId": "0xfba21f43d5fab8b9e16541665ce599ad0667db7ac1d682ca8ced4ac7164dac6d",
-      "book": {
-        "hash": "0xf73140e3e3c6fb08c14d63710d1702bea8f7b48815ce355b9e96783906db9540",
-        "block": 10664436,
-        "gasUsed": 351914,
-        "url": "https://explore.qore.network/tx/0xf73140e3e3c6fb08c14d63710d1702bea8f7b48815ce355b9e96783906db9540"
-      },
-      "refund": {
-        "hash": "0x1e17565c5ee8d038c1d76589fbbdc2777aed214bccca00d03f0b85571bca5d95",
-        "block": 10664524,
-        "gasUsed": 50112,
-        "url": "https://explore.qore.network/tx/0x1e17565c5ee8d038c1d76589fbbdc2777aed214bccca00d03f0b85571bca5d95"
-      }
-    }
-  },
+  "flows": {},
   "superseded": [
     {
       "reason": "First caller of setMandate became an agent's permanent owner (front-runnable); replaced by the (owner, agent)-keyed contract.",
@@ -201,63 +164,151 @@
         "cancel": 243746,
         "refund": 50026
       }
+    },
+    {
+      "reason": "Fares were paid by whoever called book() (the owner account through a linked agent key, which a QoreX wallet cannot set up from a website); replaced by the deposit-and-budget contract the owner's own wallet funds (ADR-0003).",
+      "contract": {
+        "address": "0xAEF0d6a8B85A9a95091818c3142B8b065C7fCE10",
+        "deployer": "0xb73af9e1AC316Eb1B1a160c7866F3D937178F5F0",
+        "deployTx": {
+          "hash": "0x45559abede2aba2ebba1cfe6566c0fa96cdfb20b31bbdab74ae991726502e4c5",
+          "block": 10664415,
+          "gasUsed": 1673638,
+          "url": "https://explore.qore.network/tx/0x45559abede2aba2ebba1cfe6566c0fa96cdfb20b31bbdab74ae991726502e4c5"
+        }
+      },
+      "mandate": {
+        "owner": "0xb73af9e1AC316Eb1B1a160c7866F3D937178F5F0",
+        "agent": "0x7e59bC2f534ddf39317A1a3ab38B0675eFbab811",
+        "merchant": "0x4f9838Cc3A7F73c1aF4910DB99A8f34fc3C7E574",
+        "tx": {
+          "hash": "0x02d1605f7d54bbc8df2ca78b19ba8713a6ca6639f4ec1786f19f6e7255553d4c",
+          "block": 10664423,
+          "gasUsed": 140660,
+          "url": "https://explore.qore.network/tx/0x02d1605f7d54bbc8df2ca78b19ba8713a6ca6639f4ec1786f19f6e7255553d4c"
+        }
+      },
+      "evmWindows": [
+        {
+          "label": "owner EVM signer: deploy + setMandate",
+          "maxTxs": 2,
+          "maxValueUqor": "375000",
+          "blocks": 900,
+          "allowedTargets": [],
+          "tx": {
+            "hash": "C0DB65EAF0D5B6F38B88487137C0D4C0F5A153F62E4F617F40211EC18D21B47C",
+            "block": 10664407,
+            "url": "https://explore.qore.network/tx/C0DB65EAF0D5B6F38B88487137C0D4C0F5A153F62E4F617F40211EC18D21B47C"
+          }
+        },
+        {
+          "label": "agent EVM signer: 3 bookings + confirmTicket/cancel/refund",
+          "maxTxs": 6,
+          "maxValueUqor": "3442500",
+          "blocks": 900,
+          "allowedTargets": [
+            "0xAEF0d6a8B85A9a95091818c3142B8b065C7fCE10"
+          ],
+          "tx": {
+            "hash": "EA5D9E79F5A2016A61894E508FE678285CA46C5A7AC082A5AD0E4D139CDD19DD",
+            "block": 10664425,
+            "url": "https://explore.qore.network/tx/EA5D9E79F5A2016A61894E508FE678285CA46C5A7AC082A5AD0E4D139CDD19DD"
+          }
+        }
+      ],
+      "gas": {
+        "deploy": 1673638,
+        "setMandate": 140660,
+        "book": 351734,
+        "confirmTicket": 238661,
+        "cancel": 243690,
+        "refund": 50112
+      },
+      "flows": {
+        "confirm": {
+          "bookingId": "0x7fd4b02422123240b83e0d101597ca0a3af364efaff9b6b28e87d1973cefaa7b",
+          "book": {
+            "hash": "0x68557823256ccc7a0b01f8b7814de520ae66998574fec8df5a7d879c823e0a2c",
+            "block": 10664428,
+            "gasUsed": 351734,
+            "url": "https://explore.qore.network/tx/0x68557823256ccc7a0b01f8b7814de520ae66998574fec8df5a7d879c823e0a2c"
+          },
+          "confirmTicket": {
+            "hash": "0xe8050f43da7c493cd40d1dfcf468e5f0d20ee1960912c1ec6d9924790ba5e971",
+            "block": 10664430,
+            "gasUsed": 238661,
+            "url": "https://explore.qore.network/tx/0xe8050f43da7c493cd40d1dfcf468e5f0d20ee1960912c1ec6d9924790ba5e971"
+          }
+        },
+        "cancel": {
+          "bookingId": "0xd13d9f2d9824edfe76678bdcac43de54c6c3723c8ab2d837af253e46564a8e00",
+          "book": {
+            "hash": "0x1c3d97028798fdd7d1c59a2b4e618f175d2fe351b0fab2b8e7dc52835f491565",
+            "block": 10664432,
+            "gasUsed": 351950,
+            "url": "https://explore.qore.network/tx/0x1c3d97028798fdd7d1c59a2b4e618f175d2fe351b0fab2b8e7dc52835f491565"
+          },
+          "cancel": {
+            "hash": "0x830326a3215b838fcf00ffbdfbfe6a39a8f87d6613c10cfbfcfc208f9eb40717",
+            "block": 10664434,
+            "gasUsed": 243690,
+            "url": "https://explore.qore.network/tx/0x830326a3215b838fcf00ffbdfbfe6a39a8f87d6613c10cfbfcfc208f9eb40717"
+          }
+        },
+        "refund": {
+          "bookingId": "0xfba21f43d5fab8b9e16541665ce599ad0667db7ac1d682ca8ced4ac7164dac6d",
+          "book": {
+            "hash": "0xf73140e3e3c6fb08c14d63710d1702bea8f7b48815ce355b9e96783906db9540",
+            "block": 10664436,
+            "gasUsed": 351914,
+            "url": "https://explore.qore.network/tx/0xf73140e3e3c6fb08c14d63710d1702bea8f7b48815ce355b9e96783906db9540"
+          },
+          "refund": {
+            "hash": "0x1e17565c5ee8d038c1d76589fbbdc2777aed214bccca00d03f0b85571bca5d95",
+            "block": 10664524,
+            "gasUsed": 50112,
+            "url": "https://explore.qore.network/tx/0x1e17565c5ee8d038c1d76589fbbdc2777aed214bccca00d03f0b85571bca5d95"
+          }
+        }
+      }
+    }
+  ],
+  "otherContracts": [
+    {
+      "address": "0x42f12D4f2136a6D1782B91B39822793fe885BA1E",
+      "note": "FlightEscrow (v1 code) created at deployer nonce 8 by an unrecorded run; never used, holds nothing."
+    },
+    {
+      "address": "0x1bFC3EB48d761F013E9cc3a4Ff0D19b6dAAeBcB4",
+      "note": "FlightEscrow (v1 code) created at deployer nonce 11 by an unrecorded run; never used, holds nothing."
+    },
+    {
+      "address": "0x2faaaa7432a2c07f95421376b72eeb0b2e0d1525",
+      "note": "ProbeRecorder for pnpm live:probe-crossvm (MsgCrossVMCall msg.sender / funds check, ADR-0003)."
     }
   ],
   "evmWindows": [
     {
       "label": "owner EVM signer: deploy + setMandate",
       "maxTxs": 2,
-      "maxValueUqor": "375000",
+      "maxValueUqor": "525000",
       "blocks": 900,
       "allowedTargets": [],
       "tx": {
-        "hash": "C0DB65EAF0D5B6F38B88487137C0D4C0F5A153F62E4F617F40211EC18D21B47C",
-        "block": 10664407,
-        "url": "https://explore.qore.network/tx/C0DB65EAF0D5B6F38B88487137C0D4C0F5A153F62E4F617F40211EC18D21B47C"
-      }
-    },
-    {
-      "label": "agent EVM signer: 3 bookings + confirmTicket/cancel/refund",
-      "maxTxs": 6,
-      "maxValueUqor": "3442500",
-      "blocks": 900,
-      "allowedTargets": [
-        "0xAEF0d6a8B85A9a95091818c3142B8b065C7fCE10"
-      ],
-      "tx": {
-        "hash": "EA5D9E79F5A2016A61894E508FE678285CA46C5A7AC082A5AD0E4D139CDD19DD",
-        "block": 10664425,
-        "url": "https://explore.qore.network/tx/EA5D9E79F5A2016A61894E508FE678285CA46C5A7AC082A5AD0E4D139CDD19DD"
+        "hash": "6A24219E5CCEAD79CAE6E068FF8C11CE4958BBD176601106B37EBFD022B1D220",
+        "block": 10903025,
+        "url": "https://explore.qore.network/tx/6A24219E5CCEAD79CAE6E068FF8C11CE4958BBD176601106B37EBFD022B1D220"
       }
     }
   ],
   "contract": {
-    "address": "0xAEF0d6a8B85A9a95091818c3142B8b065C7fCE10",
+    "address": "0xb66F174834A082cee16e7BaCC17Cb1305361C186",
     "deployer": "0xb73af9e1AC316Eb1B1a160c7866F3D937178F5F0",
     "deployTx": {
-      "hash": "0x45559abede2aba2ebba1cfe6566c0fa96cdfb20b31bbdab74ae991726502e4c5",
-      "block": 10664415,
-      "gasUsed": 1673638,
-      "url": "https://explore.qore.network/tx/0x45559abede2aba2ebba1cfe6566c0fa96cdfb20b31bbdab74ae991726502e4c5"
+      "hash": "0xe22a7a12677f8debde89ac42a0c735183d0624c21cca73d3259e3d94a59171ab",
+      "block": 10903033,
+      "gasUsed": 2090700,
+      "url": "https://explore.qore.network/tx/0xe22a7a12677f8debde89ac42a0c735183d0624c21cca73d3259e3d94a59171ab"
     }
-  },
-  "mandate": {
-    "owner": "0xb73af9e1AC316Eb1B1a160c7866F3D937178F5F0",
-    "agent": "0x7e59bC2f534ddf39317A1a3ab38B0675eFbab811",
-    "merchant": "0x4f9838Cc3A7F73c1aF4910DB99A8f34fc3C7E574",
-    "tx": {
-      "hash": "0x02d1605f7d54bbc8df2ca78b19ba8713a6ca6639f4ec1786f19f6e7255553d4c",
-      "block": 10664423,
-      "gasUsed": 140660,
-      "url": "https://explore.qore.network/tx/0x02d1605f7d54bbc8df2ca78b19ba8713a6ca6639f4ec1786f19f6e7255553d4c"
-    }
-  },
-  "gas": {
-    "deploy": 1673638,
-    "setMandate": 140660,
-    "book": 351734,
-    "confirmTicket": 238661,
-    "cancel": 243690,
-    "refund": 50112
   }
 }

@@ -8,11 +8,16 @@ import { BoardingPass } from "@/components/BoardingPass";
 import { FlowBand } from "@/components/FlowBand";
 import { Card, HashText, PrimaryButton, SourceTag } from "@/components/ui";
 import { WalletModal } from "@/components/WalletModal";
-import { ADDRESSES, getChain, liveChain, MANDATE_TX_STEPS, shortAddr, type ChainStatus } from "@/lib/chain";
+import { keccak256, type Hex } from "viem";
+import { ADDRESSES, CHAIN, liveChain, liveOwner, shortAddr, simulatedChain, SIMULATED_MANDATE_STEPS, type ChainStatus, type MandatePlan } from "@/lib/chain";
 import { formatExpiry, mandateRules, usd } from "@/lib/mandate";
 import { encryptPassenger, preview, signAsOwner, type SignResult } from "@/lib/pq";
+import { connectQorex, isRejection, newSessionKey, signAndBroadcast } from "@/lib/qorex";
 import { useDemo } from "@/lib/store";
 import type { LiveAddresses, PassengerInput } from "@/lib/types";
+
+/** ML-DSA-87 signature size: the post-quantum half of every QoreX transaction signature. */
+const ML_DSA_87_SIG_BYTES = 4627;
 
 export default function MandatePage() {
   const router = useRouter();
@@ -21,6 +26,8 @@ export default function MandatePage() {
   const [walletOpen, setWalletOpen] = useState(false);
   const signRef = useRef<SignResult | null>(null);
   const encRef = useRef<Awaited<ReturnType<typeof encryptPassenger>> | null>(null);
+  /** Live: this signing's session key, the wallet plan, and what the wallet sent. */
+  const liveRef = useRef<{ owner: string; sessionKey: string; plan?: Extract<MandatePlan, { ok: true }>; txHash?: string; shield?: string } | null>(null);
   // A mandate signed in the other mode has to be signed again in this one (D-25).
   const signed = state.signed && (state.signed.mode ?? "simulated") === state.mode ? state.signed : undefined;
   const rules = mandateRules(m);
@@ -41,11 +48,9 @@ export default function MandatePage() {
     };
   }, [mode]);
 
-  /** Who signs: the demo constants, or in Live the server's owner account and linked agent key. */
+  /** Simulated: the demo constants. */
   function parties() {
-    return latest().mode === "live" && liveAddrs
-      ? { owner: liveAddrs.owner.account.cosmos, agent: liveAddrs.agent.signer }
-      : { owner: ADDRESSES.owner, agent: ADDRESSES.agent };
+    return { owner: ADDRESSES.owner, agent: ADDRESSES.agent };
   }
 
   function setPassenger(patch: Partial<PassengerInput>) {
@@ -55,11 +60,10 @@ export default function MandatePage() {
   const steps =
     mode === "live"
       ? [
-          { label: "Hash the mandate and sign it with ML-DSA-87" },
           { label: "Encrypt the passport for the merchant (ML-KEM-1024)" },
-          { label: `Link the agent key + spending cap: ${m.maxFareUsd} fUSD, book() only` },
-          { label: `Open scoped window: FlightEscrow only, ${m.maxTickets} tx` },
-          { label: "Write the mandate to FlightEscrow (setMandate)" },
+          { label: `Prepare: deposit up to ${usd(m.maxFareUsd * m.maxTickets)} of QOR + the mandate for FlyGate's agent` },
+          { label: "Approve in QoreX (secp256k1 + ML-DSA-87)" },
+          { label: "FlightEscrow holds your deposit and rules" },
         ]
       : [
           { label: "Hash the mandate and sign it with ML-DSA-87" },
@@ -70,45 +74,104 @@ export default function MandatePage() {
         ];
 
   async function runStep(i: number) {
+    return latest().mode === "live" ? runLiveStep(i) : runSimulatedStep(i);
+  }
+
+  async function encrypt() {
+    const e = await encryptPassenger(p);
+    encRef.current = e;
+    return `KEM ${e.kemCiphertextBytes.toLocaleString()} bytes + AES-GCM ${e.aesCiphertextBytes} bytes`;
+  }
+
+  async function runSimulatedStep(i: number) {
     if (i === 0) {
-      // A fresh nonce per signing: the Live server keeps each step's tx per mandate hash, so a
-      // repeat round (or a retry after a failed step) must get a new hash to send again.
       const r = await signAsOwner({ mandate: m, ...parties(), nonce: crypto.randomUUID() });
       signRef.current = r;
       return `${r.sigBytes.toLocaleString()} bytes · ${r.ms} ms · ${r.verified ? "verified" : "failed"}`;
     }
-    if (i === 1) {
-      const e = await encryptPassenger(p);
-      encRef.current = e;
-      return `KEM ${e.kemCiphertextBytes.toLocaleString()} bytes + AES-GCM ${e.aesCiphertextBytes} bytes`;
+    if (i === 1) return encrypt();
+    const [tx] = await Promise.all([simulatedChain.setupMandate({ step: SIMULATED_MANDATE_STEPS[i - 2], mandate: m, mandateHash: signRef.current?.hash }), wait(650)]);
+    addTx(tx);
+    return `${tx.msg} · ${tx.hash.slice(0, 14)}…`;
+  }
+
+  /**
+   * Live: the owner's own QoreX wallet signs one transaction (deposit + openMandate); FlyGate's
+   * server only builds it and then checks on diana that FlightEscrow holds it (ADR-0003).
+   */
+  async function runLiveStep(i: number) {
+    if (i === 0) {
+      // A fresh session key per signing: its hash goes into the on-chain mandateHash.
+      const owner = latest().wallet ?? (await connectWallet());
+      liveRef.current = { owner, sessionKey: newSessionKey() };
+      return encrypt();
     }
-    const stepMode = latest().mode;
-    // Keep the minimum animation time; a Live tx waits for inclusion on top (D-30).
-    const [tx] = await Promise.all([
-      getChain(stepMode).setupMandate({ step: MANDATE_TX_STEPS[stepMode][i - 2], mandate: m, mandateHash: signRef.current?.hash }),
-      wait(650),
-    ]);
+    const l = liveRef.current!;
+    const controlHash = keccak256(l.sessionKey as Hex);
+    if (i === 1) {
+      const plan = await liveOwner.prepareMandate({ mandate: m, owner: l.owner, controlHash });
+      if (!plan.ok) throw new Error(`${plan.code} · ${plan.reason}`);
+      l.plan = plan;
+      return plan.depositQor === "0"
+        ? `Your budget already covers it (${plan.budgetQor} QOR) · agent ${shortAddr(plan.agent, 6, 4)}`
+        : `Deposit ${plan.depositQor} QOR → FlightEscrow · budget ${plan.budgetQor} QOR · agent ${shortAddr(plan.agent, 6, 4)}`;
+    }
+    if (i === 2) {
+      try {
+        const r = await signAndBroadcast(l.plan!.request);
+        l.txHash = r.txHash;
+        l.shield = r.shield;
+        return `tx ${r.txHash.slice(0, 12)}… · ${r.shield}`;
+      } catch (err) {
+        if (isRejection(err)) throw new Error("You declined in QoreX. Nothing was sent.");
+        throw err;
+      }
+    }
+    const tx = await liveOwner.confirmMandate({ mandate: m, owner: l.owner, controlHash, txHash: l.txHash! });
     if (!tx.ok) throw new Error(`${tx.code ?? "failed"}${tx.reason ? ` · ${tx.reason}` : ""}`);
     addTx(tx);
     return `${tx.msg} · ${tx.hash.slice(0, 14)}…`;
   }
 
+  async function connectWallet() {
+    const owner = await connectQorex(CHAIN.chainId);
+    update((s) => ({ ...s, wallet: owner }));
+    return owner;
+  }
+
   function onSigned() {
-    const r = signRef.current;
     const e = encRef.current;
-    if (!r || !e) return;
+    const l = liveRef.current;
+    const r = signRef.current;
+    if (!e) return;
+    const isLive = latest().mode === "live";
+    if (isLive ? !l?.plan : !r) return;
+    const signed =
+      isLive && l?.plan
+        ? {
+            hash: l.plan.mandateHash,
+            sigBytes: ML_DSA_87_SIG_BYTES,
+            pkBytes: 2592,
+            sigPreview: l.txHash ?? "",
+            signMs: 0,
+            signedAt: Date.now(),
+            agentAddress: l.plan.agent,
+            mode: "live" as const,
+            live: { owner: l.owner, sessionKey: l.sessionKey, depositQor: l.plan.depositQor, budgetQor: l.plan.budgetQor, shield: l.shield },
+          }
+        : {
+            hash: r!.hash,
+            sigBytes: r!.sigBytes,
+            pkBytes: r!.pkBytes,
+            sigPreview: preview(r!.sig),
+            signMs: r!.ms,
+            signedAt: Date.now(),
+            agentAddress: parties().agent,
+            mode: "simulated" as const,
+          };
     update((s) => ({
       ...s,
-      signed: {
-        hash: r.hash,
-        sigBytes: r.sigBytes,
-        pkBytes: r.pkBytes,
-        sigPreview: preview(r.sig),
-        signMs: r.ms,
-        signedAt: Date.now(),
-        agentAddress: parties().agent,
-        mode: s.mode,
-      },
+      signed,
       passenger: {
         displayName: `${s.passengerInput.surname} / ${s.passengerInput.givenName}`,
         passportMasked: `${s.passengerInput.passportNo.slice(0, 2)}•••••${s.passengerInput.passportNo.slice(-2)}`,
@@ -205,9 +268,19 @@ export default function MandatePage() {
                   <Row k="ML-DSA-87 signature">
                     <span className="font-mono text-xs">{signed.sigBytes.toLocaleString()} bytes</span>
                   </Row>
-                  <Row k="Agent key">
+                  <Row k={signed.live ? "FlyGate agent" : "Agent key"}>
                     <span className="font-mono text-xs">{shortAddr(signed.agentAddress, 9, 4)}</span>
                   </Row>
+                  {signed.live && (
+                    <>
+                      <Row k="Your account">
+                        <span className="font-mono text-xs">{shortAddr(signed.live.owner, 9, 4)}</span>
+                      </Row>
+                      <Row k="Budget in escrow">
+                        <span className="font-mono text-xs">{signed.live.budgetQor} QOR</span>
+                      </Row>
+                    </>
+                  )}
                 </dl>
                 <ul className="space-y-2 border-t border-line pt-4">
                   {ownerTxs.map((t) => (
@@ -223,12 +296,16 @@ export default function MandatePage() {
                 <PrimaryButton className="w-full" onClick={() => router.push("/search")}>
                   Let the agent book <ArrowRight className="size-5" />
                 </PrimaryButton>
+                {signed.live && <CloseMandate owner={signed.live.owner} />}
               </div>
             ) : (
               <div className="space-y-4">
                 <h2 className="text-lg font-bold text-ink">One signature sets 3 things</h2>
                 <ol className="space-y-3 text-sm">
-                  {[`Agent key, valid until ${formatExpiry(m.expiresAt)}`, `Spending cap: ${usd(m.maxFareUsd)} per ticket`, "Payments go to escrow only"].map((t, i) => (
+                  {(mode === "live"
+                    ? [`Deposit up to ${usd(m.maxFareUsd * m.maxTickets)} of QOR into FlightEscrow`, `The agent may spend it only on ${usd(m.maxFareUsd)} tickets that match, until ${formatExpiry(m.expiresAt)}`, "Withdraw what is unspent any time"]
+                    : [`Agent key, valid until ${formatExpiry(m.expiresAt)}`, `Spending cap: ${usd(m.maxFareUsd)} per ticket`, "Payments go to escrow only"]
+                  ).map((t, i) => (
                     <li key={t} className="flex gap-3">
                       <span className="grid size-6 shrink-0 place-items-center rounded-full bg-brand-50 text-xs font-bold text-brand">{i + 1}</span>
                       {t}
@@ -236,10 +313,11 @@ export default function MandatePage() {
                   ))}
                 </ol>
                 <p className="flex items-start gap-2 rounded-xl bg-pq-50 p-3 text-xs text-pq">
-                  <ShieldCheck className="size-4 shrink-0" /> Only your ML-DSA-87 key can change these rules.
+                  <ShieldCheck className="size-4 shrink-0" />
+                  {mode === "live" ? "You sign in your own QoreX wallet. FlyGate never sees your keys or recovery phrase." : "Only your ML-DSA-87 key can change these rules."}
                 </p>
                 <PrimaryButton className="w-full py-4" onClick={() => setWalletOpen(true)}>
-                  Sign with QoreX
+                  {mode === "live" && !state.wallet ? "Connect QoreX and sign" : "Sign with QoreX"}
                 </PrimaryButton>
                 <Link href="/" className="block text-center text-sm text-brand hover:underline">
                   Edit trip
@@ -259,13 +337,16 @@ export default function MandatePage() {
             { k: "Max fare", v: usd(m.maxFareUsd) },
             { k: "Expires", v: formatExpiry(m.expiresAt) },
             { k: "Agent", v: shortAddr(liveAddrs?.agent.signer ?? ADDRESSES.agent, 9, 4) },
+            ...(mode === "live" ? [{ k: "Deposit", v: `up to ${usd(m.maxFareUsd * m.maxTickets)} in QOR` }] : []),
           ]}
-          signer={mode === "live" ? "server" : "simulated"}
+          signer={mode === "live" ? "wallet" : "simulated"}
           accounts={
-            liveAddrs && [
-              { k: "Pays from", v: `owner account ${shortAddr(liveAddrs.owner.account.cosmos, 8, 4)} / ${shortAddr(liveAddrs.owner.account.evm, 6, 4)}` },
-              { k: "Refunds to", v: `owner EVM address ${shortAddr(liveAddrs.owner.signer, 6, 4)}` },
-            ]
+            mode === "live"
+              ? [
+                  { k: "Pays from", v: state.wallet ? shortAddr(state.wallet, 10, 6) : "the QoreX account you connect" },
+                  { k: "Refunds to", v: "your budget in FlightEscrow (withdraw any time)" },
+                ]
+              : undefined
           }
           steps={steps}
           runStep={runStep}
@@ -303,5 +384,43 @@ function Input({ label, value, onChange }: { label: string; value: string; onCha
       <span className="block text-xs text-muted">{label}</span>
       <input value={value} onChange={(e) => onChange(e.target.value)} className="w-full bg-transparent font-bold text-ink outline-none" />
     </label>
+  );
+}
+
+/**
+ * Live: revoke FlyGate's agent and get the unspent budget back, signed in the owner's QoreX
+ * wallet (closeMandate). Bookings already locked still settle; their refunds come straight back.
+ */
+function CloseMandate({ owner }: { owner: string }) {
+  const { update, addTx } = useDemo();
+  const [phase, setPhase] = useState<"idle" | "busy" | "done">("idle");
+  const [message, setMessage] = useState<string | undefined>();
+
+  async function close() {
+    setPhase("busy");
+    setMessage(undefined);
+    try {
+      const plan = await liveOwner.prepareClose(owner);
+      if (!plan.ok) throw new Error(plan.reason);
+      const { txHash } = await signAndBroadcast(plan.request);
+      const tx = await liveOwner.confirmClose(owner, txHash);
+      if (!tx.ok) throw new Error(`${tx.code ?? "failed"}${tx.reason ? ` · ${tx.reason}` : ""}`);
+      addTx(tx);
+      update((s) => ({ ...s, signed: undefined, revoked: true }));
+      setMessage(`${plan.refundQor} QOR returned to your wallet.`);
+      setPhase("done");
+    } catch (err) {
+      setMessage(isRejection(err) ? "You declined in QoreX. Nothing was sent." : err instanceof Error ? err.message : String(err));
+      setPhase("idle");
+    }
+  }
+
+  return (
+    <div className="space-y-2 border-t border-line pt-4 text-xs">
+      <button type="button" onClick={close} disabled={phase !== "idle"} className="font-bold text-block hover:underline disabled:opacity-50">
+        {phase === "busy" ? "Waiting for QoreX…" : "Close mandate and withdraw the budget"}
+      </button>
+      {message && <p className="text-ink-2">{message}</p>}
+    </div>
   );
 }

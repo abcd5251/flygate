@@ -27,7 +27,7 @@ import {
   type Quote,
   type TicketProof,
 } from "../../src/lib/escrow";
-import { agentWindow, FARE_WEI, GAS_CAP, ownerMandateWindow } from "./budget";
+import { agentWindow, E2E_DEPOSIT_WEI, FARE_WEI, GAS_CAP, ownerMandateWindow } from "./budget";
 import { readRecord, txRecord as recordTx, writeRecord, type DeploymentRecord, type FlowRecord, type TxRecord } from "./record";
 import { openWindow } from "./signers";
 import { makeClients, sendContractTx, walletFor, type Clients, type Wallet } from "./tx";
@@ -66,7 +66,7 @@ function merchantSign(ctx: Ctx, message: Uint8Array): Hex {
 
 const quoteArg = (q: Quote) => ({ ...q, origin: cityCode(q.origin), destination: cityCode(q.destination) });
 
-async function setMandate(ctx: Ctx): Promise<void> {
+async function openMandate(ctx: Ctx): Promise<void> {
   const { setup } = ctx;
   const now = Math.floor(Date.now() / 1000);
   const merchant = setup.roles.merchant.account.evm;
@@ -87,18 +87,20 @@ async function setMandate(ctx: Ctx): Promise<void> {
   const mandateHash = keccak256(
     stringToBytes(JSON.stringify({ app: "flygate-e2e", ...terms, maxFareWei: terms.maxFareWei.toString(), expiresAt: terms.expiresAt.toString() })),
   );
-  await openWindow(setup, ctx.record, "owner", ownerMandateWindow(ctx.escrow), "setMandate");
+  await openWindow(setup, ctx.record, "owner", ownerMandateWindow(ctx.escrow), "openMandate");
   const r = await sendContractTx(ctx.clients, ctx.owner, {
-    label: "setMandate",
+    label: "openMandate",
     address: ctx.escrow,
     abi: escrowAbi,
-    functionName: "setMandate",
-    args: [agent, { ...terms, mandateHash }],
-    gasCap: GAS_CAP.setMandate,
+    functionName: "openMandate",
+    // An EVM caller deposits as msg.value; the agent's bookings are paid from it.
+    args: [agent, { ...terms, mandateHash }, E2E_DEPOSIT_WEI],
+    value: E2E_DEPOSIT_WEI,
+    gasCap: GAS_CAP.openMandate,
   });
   ctx.record.mandate = { owner: setup.roles.owner.signer.address, agent, merchant, tx: txRecord(ctx, r) };
   writeRecord(ctx.record);
-  log("setMandate", ctx.record.mandate.tx);
+  log("openMandate", ctx.record.mandate.tx);
 }
 
 async function book(ctx: Ctx, flow: string, ticketWindow: number): Promise<{ id: Hex; deadline: bigint; tx: TxRecord }> {
@@ -123,7 +125,6 @@ async function book(ctx: Ctx, flow: string, ticketWindow: number): Promise<{ id:
     abi: escrowAbi,
     functionName: "book",
     args: [quoteArg(quote), signature],
-    value: FARE_WEI,
     gasCap: GAS_CAP.book,
   });
   const [booked] = parseEventLogs({ abi: escrowAbi, eventName: "Booked", logs: r.logs });
@@ -249,7 +250,7 @@ async function main(): Promise<void> {
   } else {
     const ownerSigner = setup.roles.owner.signer.address;
     const ownerBefore = await evmBalance(setup.network.evmRpc, ownerSigner);
-    if (!record.mandate) await setMandate(ctx);
+    if (!record.mandate) await openMandate(ctx);
     await openWindow(setup, record, "agent", agentWindow(escrow), "3 bookings + confirmTicket/cancel/refund");
     if (todo.confirm) await confirmFlow(ctx);
     if (todo.cancel) await cancelFlow(ctx);
@@ -261,7 +262,7 @@ async function main(): Promise<void> {
   const f = record.flows;
   record.gas = {
     deploy: gasOf(record.contract.deployTx),
-    setMandate: gasOf(record.mandate?.tx),
+    openMandate: gasOf(record.mandate?.tx),
     book: gasOf(f.confirm?.book),
     confirmTicket: gasOf(f.confirm?.confirmTicket),
     cancel: gasOf(f.cancel?.cancel),

@@ -12,7 +12,7 @@ import { ADDRESSES, explorerAddressUrl, fakeHash, fakePnr, getChain, liveChain, 
 import { checkOffer, rankOffers } from "@/lib/gate";
 import { formatDateLong, usd } from "@/lib/mandate";
 import { DEMO_OFFERS, formatDuration } from "@/lib/offers";
-import { useDemo } from "@/lib/store";
+import { liveSession, useDemo } from "@/lib/store";
 import type { Booking, BookingStep, BookingStepKey, ChainTx } from "@/lib/types";
 
 const ACTOR_LABEL = { merchant: "Merchant", chain: "Chain", agent: "Agent", gate: "Gate" } as const;
@@ -82,7 +82,7 @@ export default function CheckoutPage() {
 
     function quoteInput() {
       const s = latest();
-      return { offerId: offer!.id, scenario: s.booking!.scenario, mandate: s.draft, mandateHash: s.signed?.hash };
+      return { offerId: offer!.id, scenario: s.booking!.scenario, mandate: s.draft, mandateHash: s.signed?.hash, session: liveSession(s) };
     }
 
     /** The refund step is done: the booking ends refunded and the budget gives the fare back. */
@@ -216,7 +216,7 @@ export default function CheckoutPage() {
           return "next";
         }
         case "lock": {
-          const tx = await chain.lockFunds({ offerId: offer!.id, amountUsd: b.quotedPriceUsd ?? b.priceUsd, bookingId: b.bookingId });
+          const tx = await chain.lockFunds({ offerId: offer!.id, amountUsd: b.quotedPriceUsd ?? b.priceUsd, bookingId: b.bookingId, session: liveSession(latest()) });
           if (tx.source === "live") {
             if (!tx.ok) {
               setStep(key, failedTx(tx));
@@ -225,8 +225,7 @@ export default function CheckoutPage() {
             addTx(tx);
             update((st) => ({ ...st, spentUsd: st.spentUsd + (b.quotedPriceUsd ?? b.priceUsd) }));
             const escrow = liveRef.current?.escrow ?? "FlightEscrow";
-            const payer = tx.msg.startsWith("agent EOA") ? "the agent EOA" : "your account";
-            setStep(key, { status: "done", detail: `${b.priceQor ?? "?"} QOR from ${payer} → ${shortAddr(escrow, 8, 4)}`, msg: tx.msg, ...txStep(tx), at: Date.now() });
+            setStep(key, { status: "done", detail: `${b.priceQor ?? "?"} QOR from your budget in ${shortAddr(escrow, 8, 4)}, locked for this booking`, msg: tx.msg, ...txStep(tx), at: Date.now() });
             return "next";
           }
           addTx(tx);
@@ -246,7 +245,7 @@ export default function CheckoutPage() {
         }
         case "refund": {
           const amount = b.quotedPriceUsd ?? b.priceUsd;
-          const r = await chain.cancelBooking({ offerId: offer!.id, amountUsd: amount, bookingId: b.bookingId });
+          const r = await chain.cancelBooking({ offerId: offer!.id, amountUsd: amount, bookingId: b.bookingId, session: liveSession(latest()) });
           if (cancelled) return "stop";
           const tx = r.tx;
           if (tx.source === "live" && !tx.ok) {
@@ -259,7 +258,7 @@ export default function CheckoutPage() {
           // then one balance read of the refund address shows the money is back (D-18, D-10).
           const detail =
             tx.source === "live"
-              ? `${b.priceQor ?? "?"} QOR back to your refund address ${shortAddr(r.refundTo ?? "", 8, 4)} · submitted by agent · ${r.balanceQor ? `balance now ${r.balanceQor}` : (r.readError ?? "balance not read")}`
+              ? `${b.priceQor ?? "?"} QOR back to your budget in FlightEscrow (${shortAddr(r.refundTo ?? "", 8, 4)}) · submitted by agent · ${r.balanceQor ? `budget now ${r.balanceQor}` : (r.readError ?? "budget not read")}`
               : `${amount} fUSD back to ${shortAddr(ADDRESSES.owner, 8, 4)}`;
           const liveFields: Partial<BookingStep> = tx.source === "live" ? { actor: "merchant", msg: "Refunded · FlightEscrow.cancel()", readResult: r.readResult } : {};
           refunded(amount, { status: "done", detail, ...liveFields, ...txStep(tx), at: Date.now() });
@@ -273,7 +272,7 @@ export default function CheckoutPage() {
         }
         case "proof": {
           const pnr = latest().booking?.pnr ?? "";
-          const r = await chain.confirmTicket({ offerId: offer!.id, amountUsd: b.quotedPriceUsd ?? b.priceUsd, bookingId: b.bookingId, pnr });
+          const r = await chain.confirmTicket({ offerId: offer!.id, amountUsd: b.quotedPriceUsd ?? b.priceUsd, bookingId: b.bookingId, pnr, session: liveSession(latest()) });
           const tx = r.proof;
           if (tx.source === "live") {
             // The merchant signs the TicketProof; the agent's EOA only submits it (D-19).

@@ -61,7 +61,7 @@ export type Quote = {
   ticketWindow: number; // seconds (uint32)
 };
 
-/** Mirrors FlightEscrow.Mandate: what `setMandate(agent, mandate)` stores for an agent. */
+/** Mirrors FlightEscrow.Mandate: what `openMandate(agent, mandate, deposit)` stores for an agent. */
 export type OnchainMandate = {
   merchant: Address;
   maxFareWei: bigint;
@@ -133,14 +133,20 @@ const MANDATE_TUPLE = "(address merchant, uint256 maxFareWei, uint32 maxTickets,
 
 /** The FlightEscrow functions, events and errors the Live lane calls, reads or decodes. */
 export const FLIGHT_ESCROW_ABI = parseAbi([
-  `function setMandate(address agent, ${MANDATE_TUPLE} mandate)`,
+  `function openMandate(address agent, ${MANDATE_TUPLE} mandate, uint256 deposit) payable`,
   "function revokeMandate(address agent)",
-  `function book(${QUOTE_TUPLE} quote, bytes signature) payable returns (bytes32 bookingId)`,
+  `function book(${QUOTE_TUPLE} quote, bytes signature) returns (bytes32 bookingId)`,
   "function confirmTicket((bytes32 bookingId, bytes32 pnrHash, uint64 issuedAt) proof, bytes signature)",
   "function cancel((bytes32 bookingId, uint8 reasonCode) proof, bytes signature)",
   "function refund(bytes32 bookingId)",
+  "function closeMandate(address agent)",
+  "function withdraw(address agent, uint256 amount)",
+  `function mandateOf(address owner, address agent) view returns ((bool exists, bool revoked, uint32 ticketsUsed, uint256 budget, ${MANDATE_TUPLE} mandate))`,
+  "function totalHeld() view returns (uint256)",
   "event MandateSet(address indexed owner, address indexed agent, address indexed merchant, bytes32 mandateHash)",
   "event MandateRevoked(address indexed owner, address indexed agent)",
+  "event Deposited(address indexed owner, address indexed agent, uint256 amount)",
+  "event Withdrawn(address indexed owner, address indexed agent, uint256 amount)",
   "event Booked(bytes32 indexed bookingId, address indexed agent, address indexed merchant, uint256 priceWei, uint64 deadline)",
   "event Released(bytes32 indexed bookingId, bytes32 pnrHash)",
   "event Refunded(bytes32 indexed bookingId, uint8 reason)",
@@ -148,7 +154,9 @@ export const FLIGHT_ESCROW_ABI = parseAbi([
   "error NoMandate()",
   "error MerchantMismatch()",
   "error AgentMismatch()",
-  "error WrongPayment(uint256 expected, uint256 actual)",
+  "error DepositNotReceived(uint256 deposit, uint256 unclaimed)",
+  "error InsufficientBudget(uint256 budget, uint256 priceWei)",
+  "error ValueExceedsDeposit(uint256 value, uint256 deposit)",
   "error BookingExists(bytes32 bookingId)",
   "error NotLocked(bytes32 bookingId)",
   "error TicketDeadlinePassed(bytes32 bookingId)",
@@ -170,14 +178,15 @@ export const FLIGHT_ESCROW_ABI = parseAbi([
   "error InvalidTicketWindow(uint32 ticketWindow)",
 ]);
 
-/** 4-byte selectors, as `allowedEvmCalls` and the contract's dispatcher see them. */
+/** 4-byte selectors, as the contract's dispatcher sees them. */
 export const SELECTORS = {
-  setMandate: toFunctionSelector(FLIGHT_ESCROW_ABI[0]),
+  openMandate: toFunctionSelector(FLIGHT_ESCROW_ABI[0]),
   revokeMandate: toFunctionSelector(FLIGHT_ESCROW_ABI[1]),
   book: toFunctionSelector(FLIGHT_ESCROW_ABI[2]),
   confirmTicket: toFunctionSelector(FLIGHT_ESCROW_ABI[3]),
   cancel: toFunctionSelector(FLIGHT_ESCROW_ABI[4]),
   refund: toFunctionSelector(FLIGHT_ESCROW_ABI[5]),
+  mandateOf: toFunctionSelector(FLIGHT_ESCROW_ABI[8]),
 } as const;
 
 /** Event topic0s, for eth_getLogs. */
@@ -209,16 +218,30 @@ export function encodeQuote(q: Quote): Hex {
   ]);
 }
 
-/** Calldata of `setMandate(agent, mandate)`. */
-export function encodeSetMandate(agent: Address, m: OnchainMandate): Hex {
+/**
+ * Calldata of `openMandate(agent, mandate, depositWei)`. The deposit must already be in the
+ * contract when it runs: msg.value for an EVM caller, a bank send just before it in the same tx
+ * for a QoreChain native account.
+ */
+export function encodeOpenMandate(agent: Address, m: OnchainMandate, depositWei: bigint): Hex {
   return encodeFunctionData({
     abi: FLIGHT_ESCROW_ABI,
-    functionName: "setMandate",
-    args: [agent, { ...m, origin: cityCode(m.origin), destination: cityCode(m.destination) }],
+    functionName: "openMandate",
+    args: [agent, { ...m, origin: cityCode(m.origin), destination: cityCode(m.destination) }, depositWei],
   });
 }
 
-/** Calldata of `book(quote, signature)`; the call carries `quote.priceWei` as its value. */
+/** Calldata of `closeMandate(agent)`: revoke the agent and return the whole unspent budget. */
+export function encodeCloseMandate(agent: Address): Hex {
+  return encodeFunctionData({ abi: FLIGHT_ESCROW_ABI, functionName: "closeMandate", args: [agent] });
+}
+
+/** Calldata of `mandateOf(owner, agent)`, for an eth_call. */
+export function encodeMandateOf(owner: Address, agent: Address): Hex {
+  return encodeFunctionData({ abi: FLIGHT_ESCROW_ABI, functionName: "mandateOf", args: [owner, agent] });
+}
+
+/** Calldata of `book(quote, signature)`; the price comes out of the owner's deposited budget. */
 export function encodeBook(q: Quote, signature: Hex): Hex {
   return encodeFunctionData({
     abi: FLIGHT_ESCROW_ABI,
@@ -327,9 +350,10 @@ export const escrowAbi = parseAbi([
   "struct Quote { address merchant; address agent; address owner; bytes32 offerId; uint256 priceWei; bytes3 origin; bytes3 destination; uint32 departDay; uint8 cabin; bool refundable; uint64 expiresAt; uint32 ticketWindow; }",
   "struct TicketProof { bytes32 bookingId; bytes32 pnrHash; uint64 issuedAt; }",
   "struct CancelProof { bytes32 bookingId; uint8 reasonCode; }",
-  "function setMandate(address agent, Mandate mandate)",
+  "function openMandate(address agent, Mandate mandate, uint256 deposit) payable",
   "function revokeMandate(address agent)",
-  "function book(Quote quote, bytes signature) payable returns (bytes32 bookingId)",
+  "function closeMandate(address agent)",
+  "function book(Quote quote, bytes signature) returns (bytes32 bookingId)",
   "function confirmTicket(TicketProof proof, bytes signature)",
   "function cancel(CancelProof proof, bytes signature)",
   "function refund(bytes32 bookingId)",
