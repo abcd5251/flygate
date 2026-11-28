@@ -70,6 +70,10 @@ export interface ExecutedEvmCall {
   height: bigint;
   to: Hex;
   data: Hex;
+  /** msg.value in wei: what the linked key's spending rule counts for a book(). */
+  valueWei: bigint;
+  /** Block time, unix seconds: spending-rule days are UTC calendar days. */
+  timeUnix: number;
 }
 
 export interface LogFilter {

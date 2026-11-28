@@ -77,8 +77,15 @@ function bookedQuote(agent: Hex, n: number): Quote {
 }
 const setMandateDataOf = (agent: Hex): Hex => `${SELECTORS.setMandate}${agent.slice(2).padStart(64, "0")}` as Hex;
 /** A MsgExecuteEVM that ran without an execution failure, as the owner's tx history lists it. */
-function executed(data: Hex, o: { to?: Hex; height?: bigint } = {}): ExecutedEvmCall {
-  return { hash: "AB".repeat(32), height: o.height ?? DEPLOY_BLOCK + BigInt(10), to: o.to ?? ESCROW, data };
+function executed(data: Hex, o: { to?: Hex; height?: bigint; valueWei?: bigint; timeUnix?: number } = {}): ExecutedEvmCall {
+  return {
+    hash: "AB".repeat(32),
+    height: o.height ?? DEPLOY_BLOCK + BigInt(10),
+    to: o.to ?? ESCROW,
+    data,
+    valueWei: o.valueWei ?? BigInt(0),
+    timeUnix: o.timeUnix ?? 0,
+  };
 }
 
 // ------------------------------------------------------------------ encoding constants
@@ -159,6 +166,33 @@ test("link: agent ETH address as a secp256k1 key, evm permission, mandate expiry
   // US$389 at 0.01 QOR/US$ = 3.89 QOR = 3,890,000 uqor; daily = per tx x 2 tickets.
   assert.equal(rule.perTxLimit, "3890000");
   assert.equal(rule.dailyLimit, "7780000");
+});
+
+test("link: the daily limit adds what the agent key already spent today (UTC), so every round gets its full budget", async () => {
+  const r = await roles;
+  const chain = await healthyChain();
+  const nowUnix = NOW_MS / 1000;
+  const dayStart = nowUnix - (nowUnix % 86_400);
+  const wei = (uqor: number) => BigInt(uqor) * BigInt(10) ** BigInt(12);
+  chain.state.executed = {
+    [r.owner.account.cosmos]: [
+      executed(encodeBook(bookedQuote(r.owner.account.evm, 1), "0x01"), { valueWei: wei(3_620_000), timeUnix: dayStart - 1 }), // yesterday
+      executed(encodeBook(bookedQuote(r.owner.account.evm, 2), "0x01"), { valueWei: wei(3_620_000), timeUnix: dayStart }), // today
+      executed(encodeBook(bookedQuote(r.owner.account.evm, 3), "0x01"), { valueWei: wei(3_890_000), timeUnix: nowUnix - 60 }), // today
+    ],
+  };
+  await service(chain).setupMandate({ step: "link", mandate: defaultMandate(), mandateHash: HASH });
+  const rule = valueOf<RulesMsg>(cosmosMsgs(chain, 0), "MsgUpdateSpendingRules").rules[0];
+  // The default mandate: US$400 = 4,000,000 uqor per tx, 1 ticket.
+  assert.equal(rule.perTxLimit, "4000000");
+  assert.equal(rule.dailyLimit, String(3_620_000 + 3_890_000 + 4_000_000), "spent today + per tx x 1 ticket");
+});
+
+test("link on the EOA lane: the linked key books nothing, so the daily limit is per tx x tickets", async () => {
+  const chain = await healthyChain();
+  await service(chain, env({ LIVE_BOOK_LANE: "eoa" })).setupMandate({ step: "link", mandate: defaultMandate(), mandateHash: HASH });
+  assert.equal(valueOf<RulesMsg>(cosmosMsgs(chain, 0), "MsgUpdateSpendingRules").rules[0].dailyLimit, "4000000");
+  assert.equal(chain.callsTo("executedEvmCalls").length, 0);
 });
 
 test("link: LIVE_QOR_PER_USD scales the limits", async () => {

@@ -146,8 +146,8 @@ async function executedChain() {
   const r = await roles;
   const chain = await healthyChain();
   chain.state.executed[r.owner.account.cosmos] = [
-    { hash: "AA".repeat(32), height: DEPLOY_BLOCK + BigInt(1), to: ESCROW as Hex, data: encodeBook({ ...QUOTE, expiresAt: BigInt(1) }, "0x01") },
-    { hash: EXEC_HASH, height: DEPLOY_BLOCK + BigInt(2), to: ESCROW as Hex, data: encodeBook(QUOTE, "0x01") },
+    { hash: "AA".repeat(32), height: DEPLOY_BLOCK + BigInt(1), to: ESCROW as Hex, data: encodeBook({ ...QUOTE, expiresAt: BigInt(1) }, "0x01"), valueWei: QUOTE.priceWei, timeUnix: 0 },
+    { hash: EXEC_HASH, height: DEPLOY_BLOCK + BigInt(2), to: ESCROW as Hex, data: encodeBook(QUOTE, "0x01"), valueWei: QUOTE.priceWei, timeUnix: 0 },
   ];
   return chain;
 }

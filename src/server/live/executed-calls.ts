@@ -7,8 +7,10 @@ const EXECUTE_EVM = "/qorechain.abstractaccount.v1.MsgExecuteEVM";
 export interface TxResponse {
   txhash: string;
   height: string;
+  /** Block time, RFC 3339. */
+  timestamp: string;
   code: number;
-  tx: { body: { messages: Array<{ "@type"?: string; account?: string; to?: string; data?: string }> } };
+  tx: { body: { messages: Array<{ "@type"?: string; account?: string; to?: string; value?: string; data?: string }> } };
   events?: Array<{ type: string; attributes: Array<{ key: string; value: string }> }>;
 }
 
@@ -28,7 +30,14 @@ export function executedEvmCallsOf(txs: TxResponse[], account: string): Executed
     );
     t.tx.body.messages.forEach((m, i) => {
       if (m["@type"] !== EXECUTE_EVM || m.account !== account || failed.has(String(i)) || !m.to) return;
-      out.push({ hash: t.txhash, height: BigInt(t.height), to: m.to as Hex, data: `0x${Buffer.from(m.data ?? "", "base64").toString("hex")}` });
+      out.push({
+        hash: t.txhash,
+        height: BigInt(t.height),
+        to: m.to as Hex,
+        data: `0x${Buffer.from(m.data ?? "", "base64").toString("hex")}`,
+        valueWei: BigInt(m.value || "0"),
+        timeUnix: Math.floor(Date.parse(t.timestamp) / 1000),
+      });
     });
   }
   return out;
