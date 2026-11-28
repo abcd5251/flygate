@@ -7,12 +7,6 @@ import type { LiveRole } from "./config";
 export type Hex = `0x${string}`;
 export type { PqcKeyStatus };
 
-/** A Cosmos message as @qorechain/sdk builds it (`EncodeObject`). */
-export interface CosmosMsg {
-  typeUrl: string;
-  value: unknown;
-}
-
 /** A plain EVM transaction; the signer is the sending role's coin-60 key. */
 export interface EvmTxRequest {
   to: Hex;
@@ -26,17 +20,6 @@ export interface EvmTxRequest {
 export interface BroadcastOptions {
   /** Longest wait for inclusion before the send counts as timed out (D-30). */
   timeoutMs: number;
-  /**
-   * Cosmos only: the tx carries MsgExecuteEVM / MsgExecuteCosmos. Code 0 can still be a failed
-   * authorised execution, so its results are checked and a failure is `reverted` (D-09).
-   */
-  authenticatorExecutions?: boolean;
-  /**
-   * Cosmos only: gas added on top of the "auto" estimate. The chain provisions a MsgExecuteEVM's
-   * signed gas_limit in full (v3.2.3) and refuses a tx whose gas leaves less for the call; the
-   * estimate only covers what the call used.
-   */
-  extraGas?: number;
 }
 
 /**
@@ -58,22 +41,6 @@ export interface EvmLog {
   data: Hex;
   blockNumber: bigint;
   transactionHash: Hex;
-}
-
-/**
- * A MsgExecuteEVM an account ran through a linked key, and whose execution did not fail. The
- * EVM logs of such a call never reach eth_getLogs, so this is the only trace of them.
- */
-export interface ExecutedEvmCall {
-  /** Cosmos tx hash. */
-  hash: string;
-  height: bigint;
-  to: Hex;
-  data: Hex;
-  /** msg.value in wei: what the linked key's spending rule counts for a book(). */
-  valueWei: bigint;
-  /** Block time, unix seconds: spending-rule days are UTC calendar days. */
-  timeUnix: number;
 }
 
 export interface LogFilter {
@@ -99,20 +66,19 @@ export interface EthCallRequest {
  */
 export type EthCallResult = { status: "success"; data: Hex } | { status: "reverted"; data: Hex; reason: string };
 
-/** Which MsgExecuteEVM digest diana verifies (`resolveEvmAuthDigestVersion`). */
-export type EvmAuthDigestVersion = "v1" | "v2";
-
-/** A key linked to an account (abstractaccount authenticators). */
-export interface LinkedKey {
-  /** Lowercase hex without 0x (a 20-byte ETH address for scheme secp256k1 links). */
-  pubkeyHex: string;
-  revoked: boolean;
-  expiryUnix: number;
+/** A Cosmos tx the owner's wallet sent, once included. */
+export interface IncludedCosmosTx {
+  hash: string;
+  height: number;
+  /** ABCI code; 0 = success. */
+  code: number;
+  rawLog?: string;
 }
 
 /**
  * The server-side chain interface the Live service depends on: everything it reads from and
- * sends to diana. `createDianaChain` is the real one; tests use `FakeChain`.
+ * sends to diana. The server only ever sends as FlyGate's own roles (agent, merchant); the
+ * owner's transactions are signed and sent by the owner's wallet (ADR-0003). `createDianaChain` is the real one; tests use `FakeChain`.
  * Implementations retry reads on rate limiting only, and never retry a broadcast. Sends resolve
  * with a `BroadcastOutcome` and do not throw.
  */
@@ -129,27 +95,13 @@ export interface ServerChain {
   evmBalance(address: Hex): Promise<bigint>;
   /** eth_getLogs from `fromBlock` to latest. Throws when the logs cannot be read in full. */
   getLogs(filter: LogFilter): Promise<EvmLog[]>;
-  /**
-   * Every MsgExecuteEVM that ran as `account` (qor1) without an execution failure, oldest
-   * first. Throws when the history cannot be read in full (e.g. the node pruned it).
-   */
-  executedEvmCalls(account: string): Promise<ExecutedEvmCall[]>;
-  /** Keys linked to a qor1 account, revoked ones included; none before the account's first link creates it. */
-  linkedKeys(cosmos: string): Promise<LinkedKey[]>;
   /** eth_call at latest. Resolves with the revert data when the call reverts; throws on RPC errors. */
   ethCall(req: EthCallRequest): Promise<EthCallResult>;
   /**
-   * The sequence the next MsgExecuteEVM from linked key `pubkey` (a 0x ETH address) acting for
-   * `account` (qor1) must carry (`fetchAuthNonce`). Not the account's EVM nonce.
+   * Waits up to `timeoutMs` for a Cosmos tx someone else broadcast (the owner's QoreX wallet) to
+   * be included. Resolves undefined when it is not included in time; throws on RPC errors.
    */
-  authNonce(account: string, pubkey: Hex): Promise<bigint>;
-  /** The MsgExecuteEVM digest diana verifies now (`resolveEvmAuthDigestVersion`); never guessed. */
-  evmAuthDigestVersion(): Promise<EvmAuthDigestVersion>;
-  /**
-   * One Cosmos tx from `from`'s bootstrap account (coin 118, qor1), hybrid-signed with its
-   * registered ML-DSA-87 key; waits for inclusion. Lane "cosmos", Cosmos hash.
-   */
-  sendCosmos(from: LiveRole, messages: CosmosMsg[], opts: BroadcastOptions): Promise<BroadcastOutcome>;
+  cosmosTx(hash: string, timeoutMs: number): Promise<IncludedCosmosTx | undefined>;
   /**
    * One EVM tx from `from`'s coin-60 signer; waits for the receipt. Lane "evm", 0x hash. First
    * opens an EVM window on that signer when the open one does not admit the tx (docs/FLOW.md);

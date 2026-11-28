@@ -69,8 +69,13 @@ export interface DeploymentRecord {
   evmWindows?: WindowRecord[];
   mandate?: { owner: Hex; agent: Hex; merchant: Hex; tx: TxRecord };
   flows: { confirm?: FlowRecord; cancel?: FlowRecord; refund?: FlowRecord };
-  gas?: { deploy?: number; setMandate?: number; book: number; confirmTicket: number; cancel: number; refund: number };
+  gas?: { deploy?: number; openMandate?: number; book: number; confirmTicket: number; cancel: number; refund: number };
   superseded?: SupersededRecord[];
+  /**
+   * Other contracts the deployer key created (probe targets, a deploy that was never recorded).
+   * Listed so `escrow:deploy` knows them; none of them is FlightEscrow's live deployment.
+   */
+  otherContracts?: { address: Hex; note: string }[];
 }
 
 export function emptyRecord(explorer: string): DeploymentRecord {

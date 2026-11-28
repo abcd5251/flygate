@@ -61,6 +61,12 @@ test("a window narrowed to other targets does not cover the escrow", () => {
   assert.equal(windowCovers({ ...live, allowedTargets: ["0x0000000000000000000000000000000000000001"] }, need), false);
 });
 
+test("a scoped window never covers a tx with no target (a contract creation); an open one does", () => {
+  const create = { txs: 1, value: BigInt(1), blocks: 1 };
+  assert.equal(windowCovers(live, create), false);
+  assert.equal(windowCovers({ ...live, allowedTargets: [] }, create), true);
+});
+
 test("window value is value plus gasCap x maxFee per tx, in uqor rounded up", () => {
   const maxFee = BigInt(150_000_000_000); // 150 gwei
   // 1 QOR fare + 600k gas x 150 gwei (0.09 QOR) = 1,090,000 uqor; refund 1 gas -> 1 uqor (rounded up).

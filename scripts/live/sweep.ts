@@ -1,11 +1,11 @@
 // `pnpm live:sweep` - refund FlightEscrow bookings stuck in Locked after a Live demo failed past
 // `lock` (#25, D-26). Scans Booked / Released / Refunded from FLIGHT_ESCROW_DEPLOY_BLOCK, calls
-// refund() once for each Locked booking whose ticket deadline has passed (refund() pays the
-// owner the contract recorded, whoever sends it), and lists the ones still in their window.
+// refund() once for each Locked booking whose ticket deadline has passed (refund() returns the
+// price to the owner the contract recorded, whoever sends it: to the owner's budget, or straight
+// to the owner once they closed the mandate), and lists the ones still in their window.
 //
-// Sends REAL diana transactions from the owner's coin-60 signer (the address that sends
-// setMandate, D-10). Each refund() is simulated first (a revert there sends nothing) and
-// broadcast once, never resent. If diana refuses it because the signer has no ML-DSA-87 key or
+// Sends REAL diana transactions from the dev owner key's coin-60 signer, only as a fee payer.
+// Each refund() is simulated first (a revert there sends nothing) and broadcast once, never resent. If diana refuses it because the signer has no ML-DSA-87 key or
 // no open window, the sweep fixes that cause once (register the key / open a window scoped to
 // FlightEscrow) and sends a NEW refund(); any other failure prints its code and the sweep moves
 // on to the next booking.

@@ -1,19 +1,7 @@
 import "server-only";
 // Reuses the bootstrap's pure helpers (client, balance, rate-limit retry, connect). Never imports
 // scripts/bootstrap/env.ts: that module generates and writes mnemonics (D-31).
-import {
-  assertAuthenticatorExecutionsSucceeded,
-  AuthenticatorExecutionError,
-  classifyEvmWindowRejection,
-  deriveUnifiedAccount,
-  fetchAuthenticators,
-  fetchEvmWindow,
-  fetchAuthNonce,
-  resolveEvmAuthDigestVersion,
-  QoreTxError,
-  type TxClient,
-  type UnifiedAccount,
-} from "@qorechain/sdk";
+import { classifyEvmWindowRejection, deriveUnifiedAccount, fetchEvmWindow, QoreHttpError, type UnifiedAccount } from "@qorechain/sdk";
 import {
   BaseError,
   createPublicClient,
@@ -27,15 +15,12 @@ import {
   type WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { balanceOf, connect, deriveRole, makeClient, retrying } from "../../../scripts/bootstrap/chain";
+import { balanceOf, makeClient, retrying } from "../../../scripts/bootstrap/chain";
 import { deriveEvmRole } from "../../../scripts/evm/keys";
 import { openSignerWindow } from "../../../scripts/live/eth-native";
 import { decodePqcKeyStatus, encodePqcKeyStatusCall, PQC_KEY_STATUS_ADDRESS } from "../../../scripts/evm/pqcKeyStatus";
-import type { BroadcastOutcome, CosmosMsg, EthCallResult, EvmLog, Hex, ServerChain } from "./chain";
+import type { BroadcastOutcome, EthCallResult, EvmLog, Hex, IncludedCosmosTx, ServerChain } from "./chain";
 import type { LiveNetwork, LiveRole } from "./config";
-import { withExtraGas } from "./fee";
-import { executedEvmCallsOf, type TxResponse } from "./executed-calls";
-import { linkedKeysOrNone } from "./linked-keys";
 import { signerWindowToOpen } from "./signer-window";
 
 /** Longest a single read may take before it counts as an RPC error. */
@@ -65,28 +50,26 @@ async function evmRead<T>(url: string, method: string, params: unknown[]): Promi
 
 const toHexQty = (n: bigint) => `0x${n.toString(16)}`;
 
-/** Txs per page of the Cosmos tx search (the SDK caps a page at 100). */
-const TX_PAGE_LIMIT = 100;
+/** How often to ask for a Cosmos tx the owner's wallet broadcast. */
+const TX_POLL_MS = 1_500;
 
-/**
- * Every tx whose messages `sender` signed, oldest first, through the Cosmos tx search. Reads
- * every page, retried on rate limiting only; throws when any page cannot be read (a pruned node
- * answers "height … is not available").
- */
-async function txsSentBy(rest: string, sender: string): Promise<TxResponse[]> {
-  const out: TxResponse[] = [];
-  for (let page = 1; ; page++) {
-    const q = new URLSearchParams({ query: `message.sender='${sender}'`, order_by: "ORDER_BY_ASC", page: String(page), limit: String(TX_PAGE_LIMIT) });
-    const body = await retrying(async () => {
-      const res = await fetch(`${rest}/cosmos/tx/v1beta1/txs?${q}`, { signal: AbortSignal.timeout(READ_TIMEOUT_MS), cache: "no-store" });
-      const json = (await res.json().catch(() => ({}))) as { tx_responses?: TxResponse[]; total?: string; message?: string };
-      if (!res.ok) throw new Error(`tx search: HTTP ${res.status}${json.message ? `: ${json.message}` : ""}`);
-      return json;
-    });
-    const txs = body.tx_responses ?? [];
-    out.push(...txs);
-    if (txs.length < TX_PAGE_LIMIT || out.length >= Number(body.total ?? 0)) return out;
-  }
+/** GET /cosmos/tx/v1beta1/txs/{hash}: the tx once included, undefined while it is not (404). */
+async function cosmosTxOnce(rest: string, hash: string): Promise<IncludedCosmosTx | undefined> {
+  return retrying(async () => {
+    const url = `${rest}/cosmos/tx/v1beta1/txs/${hash}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(READ_TIMEOUT_MS), cache: "no-store" });
+    if (res.status === 404) return undefined;
+    const body = (await res.json().catch(() => ({}))) as { tx_response?: { txhash: string; height: string; code: number; raw_log?: string }; message?: string };
+    // Some nodes answer 400/500 with "tx not found" while the tx is still in the mempool.
+    if (!res.ok) {
+      if (/not found/i.test(body.message ?? "")) return undefined;
+      // A QoreHttpError, so `retrying` retries a 429.
+      throw new QoreHttpError(res.status, url, body.message);
+    }
+    const t = body.tx_response;
+    if (!t) return undefined;
+    return { hash: t.txhash, height: Number(t.height), code: t.code, rawLog: t.raw_log };
+  });
 }
 
 /**
@@ -144,9 +127,9 @@ function within<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * The real server-side chain: diana over @qorechain/sdk (REST, hybrid-signed Cosmos txs) and EVM
- * JSON-RPC (viem, coin-60 signers). Keys are derived on first use from `mnemonics` and never
- * leave this module. Reads are retried on rate limiting; sends never are.
+ * The real server-side chain: diana over @qorechain/sdk (REST) and EVM JSON-RPC (viem, coin-60
+ * signers of FlyGate's agent). Keys are derived on first use from `mnemonics` and never leave
+ * this module. Reads are retried on rate limiting; sends never are.
  */
 export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record<LiveRole, string>>): ServerChain {
   const client = makeClient(network);
@@ -159,7 +142,6 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
   });
   // retryCount 0: viem must never resend a transaction.
   const pub = createPublicClient({ chain: evmChain, transport: http(url, { retryCount: 0 }) }) as PublicClient;
-  const txClients = new Map<LiveRole, Promise<TxClient>>();
   const wallets = new Map<LiveRole, Promise<WalletClient>>();
   const unified = new Map<LiveRole, Promise<UnifiedAccount>>();
 
@@ -167,15 +149,6 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
     const m = mnemonics[role];
     if (!m) throw new Error(`No mnemonic for ${role}`);
     return m;
-  }
-  function txClient(role: LiveRole): Promise<TxClient> {
-    let c = txClients.get(role);
-    if (!c) {
-      c = deriveRole(role, mnemonic(role)).then((who) => connect(client, who));
-      c.catch(() => txClients.delete(role));
-      txClients.set(role, c);
-    }
-    return c;
   }
   function wallet(role: LiveRole): Promise<WalletClient> {
     let w = wallets.get(role);
@@ -254,62 +227,15 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
       }
       return out;
     },
-    async executedEvmCalls(account) {
-      return executedEvmCallsOf(await txsSentBy(network.rest, account), account);
-    },
-    async linkedKeys(cosmos) {
-      const keys = await linkedKeysOrNone(() => retrying(() => fetchAuthenticators({ rest: network.rest, address: cosmos })));
-      return keys.map((k) => ({
-        pubkeyHex: k.pubkeyHex.toLowerCase().replace(/^0x/, ""),
-        revoked: k.revoked,
-        expiryUnix: Number(k.expiryUnix),
-      }));
-    },
     ethCall(req) {
       return evmCall(url, req);
     },
-    async authNonce(account, pubkey) {
-      const { nonce } = await retrying(() => fetchAuthNonce({ rest: network.rest, address: account, pubkey }));
-      return BigInt(nonce);
-    },
-    evmAuthDigestVersion() {
-      return retrying(() => resolveEvmAuthDigestVersion({ rest: network.rest }));
-    },
-
-    async sendCosmos(from, messages, opts): Promise<BroadcastOutcome> {
-      const lane = "cosmos" as const;
-      let tx: TxClient;
-      try {
-        tx = await txClient(from);
-      } catch (err) {
-        return { status: "failed", lane, code: "connect failed", reason: errorText(err) };
-      }
-      try {
-        // Broadcast once ("commit" waits for inclusion); never retried.
-        const msgs = messages as CosmosMsg[] as Parameters<TxClient["signAndBroadcast"]>[0];
-        const fee = opts.extraGas ? withExtraGas(await tx.resolveFee(msgs, "auto", undefined), opts.extraGas) : "auto";
-        const res = await within(tx.signAndBroadcast(msgs, fee), opts.timeoutMs);
-        if (res.code !== 0) {
-          return { status: "reverted", lane, hash: res.transactionHash, code: `code ${res.code}`, reason: res.rawLog ?? "" };
-        }
-        if (opts.authenticatorExecutions) {
-          try {
-            assertAuthenticatorExecutionsSucceeded(res, messages as Parameters<typeof assertAuthenticatorExecutionsSucceeded>[1]);
-          } catch (err) {
-            if (err instanceof AuthenticatorExecutionError) {
-              const reason = err.failed.map((f) => f.reason || f.vmError).join("; ");
-              return { status: "reverted", lane, hash: res.transactionHash, code: "execution failed", reason };
-            }
-            throw err;
-          }
-        }
-        return { status: "success", lane, hash: res.transactionHash, height: res.height };
-      } catch (err) {
-        if (err instanceof Timeout) return { status: "timeout", lane, code: "timeout", reason: err.message };
-        if (err instanceof QoreTxError) {
-          return { status: "failed", lane, hash: err.txHash, code: `${err.codespace} ${err.code}`.trim(), reason: errorText(err) };
-        }
-        return { status: "failed", lane, code: "broadcast failed", reason: errorText(err) };
+    async cosmosTx(hash, timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const tx = await cosmosTxOnce(network.rest, hash);
+        if (tx || Date.now() + TX_POLL_MS > deadline) return tx;
+        await new Promise((r) => setTimeout(r, TX_POLL_MS));
       }
     },
 

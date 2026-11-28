@@ -31,9 +31,8 @@ export async function deriveLiveKeys(mnemonics: Record<LiveRole, string>): Promi
 
 /** The public half of `LiveKeys`, built field by field so no secret can slip in. */
 export function publicAddresses(keys: LiveKeys): LiveAddresses {
-  const { owner, agent, merchant } = keys.roles;
+  const { agent, merchant } = keys.roles;
   return {
-    owner: { account: { ...owner.account }, signer: owner.signer.address },
     agent: { account: { ...agent.account }, signer: agent.signer.address },
     merchant: { account: { ...merchant.account } },
   };

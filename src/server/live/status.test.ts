@@ -5,8 +5,7 @@ import { readLiveConfig, type Env } from "./config";
 import { FakeChain } from "./fake-chain";
 import { handleLiveStatus } from "./http";
 import { createLiveService, STATUS_TTL_MS } from "./service";
-import { usdToUqor } from "./money";
-import { env, ESCROW, healthyChain, MNEMONICS, QOR, roles } from "./test-fixtures";
+import { env, ESCROW, healthyChain, MNEMONICS, roles } from "./test-fixtures";
 
 function service(chain: FakeChain, e: Env = env(), now = () => 1_000_000) {
   return createLiveService({ chain, config: readLiveConfig(e), clock: { now } });
@@ -23,8 +22,8 @@ test("available when every check passes, with public addresses and the explorer 
   assert.equal(status.available, true);
   assert.equal(status.escrow, ESCROW);
   assert.equal(status.explorer, "https://explore.qore.network");
-  assert.equal(status.addresses?.owner.account.cosmos, r.owner.account.cosmos);
-  assert.equal(status.addresses?.owner.signer, r.owner.signer.address);
+  assert.equal(status.addresses?.agent.signer, r.agent.signer.address);
+  assert.ok(!("owner" in (status.addresses ?? {})), "the server holds no owner account");
   assert.equal(status.addresses?.merchant.account.evm, r.merchant.account.evm);
 });
 
@@ -72,7 +71,7 @@ test("unavailable on the wrong EVM chain id", async () => {
 test("unavailable when the merchant's on-chain PQC key is missing, wrong or unproven", async () => {
   const r = await roles;
   const key = r.merchant.account.evm.toLowerCase();
-  const other = derivePqcCanonical(r.owner.account.cosmos, MNEMONICS.OWNER_MNEMONIC).publicKey;
+  const other = derivePqcCanonical(r.agent.account.cosmos, MNEMONICS.AGENT_MNEMONIC).publicKey;
   const cases = [
     { patch: { registered: false }, reason: /not registered/ },
     { patch: { algorithmId: 2 }, reason: /algorithmId 2, expected 1/ },
@@ -88,58 +87,38 @@ test("unavailable when the merchant's on-chain PQC key is missing, wrong or unpr
   }
 });
 
-test("pqcKeyStatus is read for the merchant's bootstrap account, as FlightEscrow does, then for both EVM signers", async () => {
+test("pqcKeyStatus is read for the merchant's bootstrap account, as FlightEscrow does, then for the agent's EVM signer", async () => {
   const r = await roles;
   const chain = await healthyChain();
   await statusOf(chain);
-  assert.deepEqual(chain.callsTo("pqcKeyStatus").map((c) => c.args[0]), [r.merchant.account.evm, r.owner.signer.address, r.agent.signer.address]);
+  assert.deepEqual(chain.callsTo("pqcKeyStatus").map((c) => c.args[0]), [r.merchant.account.evm, r.agent.signer.address]);
 });
 
-test("unavailable when an EVM signer has no registered ML-DSA-87 key", async () => {
+test("unavailable when the agent's EVM signer has no registered ML-DSA-87 key", async () => {
   const r = await roles;
-  for (const role of ["owner", "agent"] as const) {
-    const chain = await healthyChain();
-    delete chain.state.pqc[r[role].signer.address.toLowerCase()];
-    const st = await statusOf(chain);
-    assert.equal(st.available, false);
-    assert.match(st.reason ?? "", role === "owner" ? /^Owner EVM signer has no registered ML-DSA-87 key/ : /^Agent EVM signer has no registered ML-DSA-87 key/);
-  }
-});
-
-test("unavailable when the owner cannot pay one max fare plus fees", async () => {
-  const r = await roles;
-  // US$400 cap at 0.01 QOR/US$ = 4 QOR; just the fare without fee headroom is not enough.
-  assert.equal(usdToUqor(400, BigInt(10_000)), BigInt(4) * QOR);
   const chain = await healthyChain();
-  chain.state.bank[r.owner.account.cosmos] = BigInt(4) * QOR;
+  delete chain.state.pqc[r.agent.signer.address.toLowerCase()];
+  const st = await statusOf(chain);
+  assert.equal(st.available, false);
+  assert.match(st.reason ?? "", /^Agent EVM signer has no registered ML-DSA-87 key/);
+});
+
+test("unavailable when FlyGate's agent is low on gas, naming the address to top up", async () => {
+  const r = await roles;
+  const chain = await healthyChain();
+  chain.state.evm[r.agent.signer.address.toLowerCase()] = BigInt(16_027) * BigInt(10) ** BigInt(12); // the 16027 uqor seen on diana
   const status = await statusOf(chain);
   assert.equal(status.available, false);
-  assert.match(status.reason!, /^Owner balance 4 QOR is below one max fare plus fees/);
+  assert.match(status.reason!, new RegExp(`^FlyGate's agent has 0\\.016027 QOR for gas, below 0\\.5 QOR: top up ${r.agent.signer.address}`));
 });
 
-test("LIVE_QOR_PER_USD scales the owner balance requirement", async () => {
+test("no owner key or owner balance is needed: Live is for any owner with a wallet", async () => {
   const r = await roles;
   const chain = await healthyChain();
-  chain.state.bank[r.owner.account.cosmos] = BigInt(30) * QOR;
-  const status = await statusOf(chain, env({ LIVE_QOR_PER_USD: "0.1" })); // US$400 -> 40 QOR
-  assert.equal(status.available, false);
-  assert.match(status.reason!, /below one max fare plus fees \(41 QOR\)/);
-});
-
-test("unavailable when the relayer or a submitting signer has no balance", async () => {
-  const r = await roles;
-  const cases = [
-    { empty: (c: FakeChain) => delete c.state.bank[r.agent.account.cosmos], reason: /^Relayer \(agent account\) has no balance/ },
-    { empty: (c: FakeChain) => delete c.state.evm[r.owner.signer.address.toLowerCase()], reason: /^Owner EVM signer has no balance/ },
-    { empty: (c: FakeChain) => delete c.state.evm[r.agent.signer.address.toLowerCase()], reason: /^Agent EVM signer has no balance/ },
-  ];
-  for (const c of cases) {
-    const chain = await healthyChain();
-    c.empty(chain);
-    const status = await statusOf(chain);
-    assert.equal(status.available, false);
-    assert.match(status.reason!, c.reason);
-  }
+  delete chain.state.bank[r.owner.cosmos];
+  const status = await statusOf(chain, env({ OWNER_MNEMONIC: undefined }));
+  assert.equal(status.available, true);
+  assert.equal(chain.callsTo("bankBalance").length, 0);
 });
 
 test("unavailable when a mnemonic is missing or invalid, naming only the variable", async () => {
@@ -149,8 +128,8 @@ test("unavailable when a mnemonic is missing or invalid, naming only the variabl
   assert.equal(missing.reason, "Missing AGENT_MNEMONIC, MERCHANT_MNEMONIC (run pnpm bootstrap)");
   assert.equal(missing.addresses, undefined);
 
-  const invalid = await statusOf(chain, env({ OWNER_MNEMONIC: "not a real mnemonic at all" }));
-  assert.equal(invalid.reason, "OWNER_MNEMONIC is not a valid BIP-39 mnemonic");
+  const invalid = await statusOf(chain, env({ AGENT_MNEMONIC: "not a real mnemonic at all" }));
+  assert.equal(invalid.reason, "AGENT_MNEMONIC is not a valid BIP-39 mnemonic");
   assert.ok(!JSON.stringify(invalid).includes("not a real mnemonic"));
   assert.equal(chain.calls.length, 0);
 });
@@ -189,13 +168,12 @@ test("no response ever contains key material", async () => {
   const secrets = [
     ...Object.values(MNEMONICS),
     ...Object.values(MNEMONICS).map((m) => m.split(" ").slice(0, 3).join(" ")),
-    r.owner.signer.privateKey.slice(2),
     r.agent.signer.privateKey.slice(2),
     r.merchant.signer.privateKey.slice(2),
     Buffer.from(r.merchantPqc.secretKey.slice(0, 32)).toString("hex"),
   ];
   const lowBalance = await healthyChain();
-  lowBalance.state.bank[r.owner.account.cosmos] = BigInt(0);
+  lowBalance.state.evm[r.agent.signer.address.toLowerCase()] = BigInt(0);
   const results = [
     await statusOf(await healthyChain()),
     await statusOf(lowBalance),
@@ -204,7 +182,7 @@ test("no response ever contains key material", async () => {
   for (const status of results) {
     const body = await (await handleLiveStatus(env(), () => ({
       status: async () => status,
-      setupMandate: async () => {
+      mandate: async () => {
         throw new Error("not used");
       },
       checkout: async () => {

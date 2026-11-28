@@ -4,7 +4,7 @@
 //   1. Bank sends (hybrid-signed): owner qor1 -> owner signer, agent qor1 -> agent signer,
 //      only the shortfall below what one run needs (SIGNER_NEED_UQOR).
 //   2. ML-DSA-87 key with proof of possession for each signer (MsgRegisterPQCKeyV2).
-//   3. Owner signer EVM window sized for the CREATE plus one setMandate (MsgOpenEVMWindow).
+//   3. Owner signer EVM window sized for the CREATE plus one openMandate (MsgOpenEVMWindow).
 //   4. `forge script contracts/script/DeployFlightEscrow.s.sol` simulates the deploy from the
 //      owner signer; the recorded CREATE is then signed here and broadcast once.
 // Writes deployments/diana.json. Never prints keys.
@@ -27,7 +27,7 @@ const SCRIPT = "contracts/script/DeployFlightEscrow.s.sol";
 const DRY_RUN_LOG = resolve(ROOT, `broadcast/DeployFlightEscrow.s.sol/${DIANA_EVM_CHAIN_ID}/dry-run/run-latest.json`);
 
 /**
- * Owner signer: deploy + setMandate gas (it also receives every refund).
+ * Owner signer: deploy gas, then the e2e openMandate with its deposit.
  * Agent signer: three 1-QOR fares plus gas per e2e run.
  * Topped up only by the shortfall, so a funded signer is never sent more.
  */
@@ -94,8 +94,8 @@ async function deploy(setup: EvmSetup, record: DeploymentRecord): Promise<void> 
     }
   }
   // A CREATE that landed without being recorded would sit at one of the signer's past nonces.
-  // Superseded deployments are known and expected there.
-  const known = new Set((record.superseded ?? []).map((s) => s.contract.address.toLowerCase()));
+  // Superseded deployments and the other recorded contracts are known and expected there.
+  const known = new Set([...(record.superseded ?? []).map((s) => s.contract.address), ...(record.otherContracts ?? []).map((c) => c.address)].map((a) => a.toLowerCase()));
   const nonce = await reads.getTransactionCount({ address: signer.address, blockTag: "latest" });
   for (let n = 0; n < nonce; n++) {
     const address = getContractAddress({ from: signer.address, nonce: BigInt(n) });
@@ -104,7 +104,7 @@ async function deploy(setup: EvmSetup, record: DeploymentRecord): Promise<void> 
     if (code && code !== "0x") throw new Error(`Owner signer already created ${address} (nonce ${n}); record it by hand.`);
   }
 
-  await openWindow(setup, record, "owner", ownerDeployWindow(), "deploy + setMandate");
+  await openWindow(setup, record, "owner", ownerDeployWindow(), "deploy + openMandate");
 
   console.log(`Simulating the deploy with forge script from owner signer ${signer.address} ...`);
   const initCode = forgeInitCode(setup, signer.address);

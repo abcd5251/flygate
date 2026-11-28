@@ -9,7 +9,7 @@
 //            quotes (pqcKeyStatus lookup, payout).
 //   signer   the coin-60 key from the same mnemonic (what MetaMask and
 //            `cast wallet --mnemonic` derive). Use it to send EVM txs (deploy,
-//            setMandate, book); msg.sender is this address. A separate account that
+//            openMandate, book); msg.sender is this address. A separate account that
 //            must be funded on its own.
 import { deriveEvmAccount, deriveNativeAccount, qoreAddresses } from "@qorechain/sdk";
 import { bytesToHex, type Hex } from "viem";

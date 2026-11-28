@@ -60,10 +60,10 @@ export function windowCovers(w: WindowView, need: WindowNeed): boolean {
   if (!w.live) return false;
   if (w.remainingTxs < BigInt(need.txs) || w.remainingValue < need.value) return false;
   if (w.remainingBlocks < BigInt(need.blocks)) return false;
-  if (need.target && w.allowedTargets.length > 0) {
-    return w.allowedTargets.some((t) => t.toLowerCase() === need.target!.toLowerCase());
-  }
-  return true;
+  if (w.allowedTargets.length === 0) return true;
+  // A scoped window admits only its targets: never a tx with no target (a contract creation).
+  if (!need.target) return false;
+  return w.allowedTargets.some((t) => t.toLowerCase() === need.target!.toLowerCase());
 }
 
 /** What a window must allow for these txs: sum of value + gasCap x maxFeePerGas, wei -> uqor rounded up. */

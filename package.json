@@ -14,7 +14,9 @@
     "escrow:deploy": "tsx scripts/escrow/deploy.ts",
     "escrow:e2e": "tsx scripts/escrow/e2e.ts",
     "live:probe": "forge build && tsx scripts/live/probe.ts",
+    "live:probe-crossvm": "tsx scripts/live/crossvm-probe.ts",
     "live:sweep": "tsx scripts/live/sweep.ts",
+    "live:e2e-wallet": "tsx scripts/live/wallet-e2e.ts",
     "test:scripts": "tsx --test 'scripts/**/*.test.ts'",
     "test:live": "tsx --conditions=react-server --test 'src/server/**/*.test.ts'",
     "test:contracts": "forge test"

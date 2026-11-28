@@ -2,14 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decodeFunctionData, encodeErrorResult, type Hex } from "viem";
 import type { CheckoutQuote, FareCapCheck, QuoteCheck } from "@/lib/chain";
-import { FLIGHT_ESCROW_ABI } from "@/lib/escrow";
+import { FLIGHT_ESCROW_ABI, SELECTORS } from "@/lib/escrow";
 import { defaultMandate } from "@/lib/mandate";
 import { DEMO_OFFERS } from "@/lib/offers";
 import type { EthCallRequest, EthCallResult } from "./chain";
 import { readLiveConfig, type Env } from "./config";
 import { defaultEthCall, type FakeChain } from "./fake-chain";
 import { createLiveService } from "./service";
-import { env, ESCROW, healthyChain, QOR, roles } from "./test-fixtures";
+import { env, ESCROW, healthyChain, QOR, roles, SESSION_KEY } from "./test-fixtures";
 
 const NOW_MS = Date.parse("2026-12-01T00:00:00Z");
 const OFFER = DEMO_OFFERS.find((o) => o.id === "off_fa802")!;
@@ -23,16 +23,12 @@ function service(chain: FakeChain, e: Env = env()) {
 
 type BookQuote = { agent: Hex; priceWei: bigint };
 
-/** FlightEscrow's book() as eth_call: WrongPayment first, then FareOverCap (FlightEscrow.sol:202, :270). */
+/** FlightEscrow's book() as eth_call: FareOverCap before the budget check (FlightEscrow.sol). */
 function escrowEthCall(req: EthCallRequest): EthCallResult {
   if (req.to.toLowerCase() !== ESCROW) return defaultEthCall(req);
   const d = decodeFunctionData({ abi: FLIGHT_ESCROW_ABI, data: req.data });
   assert.equal(d.functionName, "book");
   const [quote] = d.args as unknown as [BookQuote, Hex];
-  const value = req.value ?? BigInt(0);
-  if (value !== quote.priceWei) {
-    return { status: "reverted", data: encodeErrorResult({ abi: FLIGHT_ESCROW_ABI, errorName: "WrongPayment", args: [quote.priceWei, value] }), reason: "execution reverted" };
-  }
   if (quote.priceWei > MAX_FARE_WEI) {
     return { status: "reverted", data: encodeErrorResult({ abi: FLIGHT_ESCROW_ABI, errorName: "FareOverCap", args: [MAX_FARE_WEI, quote.priceWei] }), reason: "execution reverted" };
   }
@@ -42,7 +38,7 @@ function escrowEthCall(req: EthCallRequest): EthCallResult {
 /** Fare jumps up to the gate: the merchant signs US$428, pqcVerify checks it. */
 async function fareJumps(chain: FakeChain, e?: Env) {
   const svc = service(chain, e);
-  const q = (await svc.checkout({ step: "quote", offerId: OFFER.id, scenario: "price_change", mandate: defaultMandate() })) as CheckoutQuote & { ok: true; bookingId: Hex };
+  const q = (await svc.checkout({ step: "quote", offerId: OFFER.id, scenario: "price_change", mandate: defaultMandate(), owner: (await roles).owner.cosmos, sessionKey: SESSION_KEY })) as CheckoutQuote & { ok: true; bookingId: Hex };
   assert.equal(q.ok, true);
   assert.equal(q.priceUsd, 428);
   const v = (await svc.checkout({ step: "verify", bookingId: q.bookingId })) as QuoteCheck;
@@ -52,42 +48,32 @@ async function fareJumps(chain: FakeChain, e?: Env) {
   return { svc, q, cap, after: chain.calls.slice(mark) };
 }
 
-test("Fare jumps: 0 broadcasts, 1 book() eth_call answering FareOverCap, 1 balance read before and 1 after", async () => {
+test("Fare jumps: 0 broadcasts, 1 book() eth_call answering FareOverCap, the owner's budget read before and after", async () => {
   const r = await roles;
   const chain = await healthyChain();
   chain.state.ethCall = escrowEthCall;
   const { cap, after } = await fareJumps(chain);
 
   assert.equal(chain.broadcasts().length, 0, "nothing is ever sent in Fare jumps");
-  const bookCalls = chain.callsTo("ethCall").filter((c) => (c.args[0] as EthCallRequest).to.toLowerCase() === ESCROW);
+  const bookCalls = chain.callsTo("ethCall").filter((c) => (c.args[0] as EthCallRequest).data.startsWith(SELECTORS.book));
   assert.equal(bookCalls.length, 1);
 
-  // The farecap step itself: balance, eth_call of book(), balance, in that order.
-  assert.deepEqual(after.map((c) => c.method), ["bankBalance", "ethCall", "bankBalance"]);
-  assert.equal(after[0].args[0], r.owner.account.cosmos);
-  assert.equal(after[2].args[0], r.owner.account.cosmos);
+  // The farecap step itself: budget, eth_call of book(), budget, in that order.
+  const datas = after.map((c) => (c.args[0] as EthCallRequest).data.slice(0, 10));
+  assert.deepEqual(after.map((c) => c.method), ["ethCall", "ethCall", "ethCall"]);
+  assert.deepEqual(datas, [SELECTORS.mandateOf, SELECTORS.book, SELECTORS.mandateOf]);
 
   const req = after[1].args[0] as EthCallRequest;
   const [quote] = decodeFunctionData({ abi: FLIGHT_ESCROW_ABI, data: req.data }).args as unknown as [BookQuote, Hex];
   assert.equal(quote.priceWei, PRICE_428_WEI, "the US$428 quote the merchant signed");
-  assert.equal(req.value, PRICE_428_WEI, "msg.value equals the price, so WrongPayment does not fire first");
-  assert.equal(req.from?.toLowerCase(), r.owner.account.evm.toLowerCase(), "authenticator lane: book() runs from the owner account's 0x address");
+  assert.equal(req.value, undefined, "book() takes no value: the budget pays");
+  assert.equal(req.from, r.agent.signer.address, "book() runs from FlyGate's agent");
 
   assert.equal(cap.source, "live");
   assert.equal(cap.ok, true);
   assert.equal(cap.tx, undefined, "a Live read, no tx and no hash");
   assert.match(cap.readResult ?? "", /FareOverCap\(maxFareWei 4000000000000000000 wei \(4 QOR\), priceWei 4280000000000000000 wei \(4\.28 QOR\)\)/);
-  assert.match(cap.readResult ?? "", /Balance unchanged: 60 QOR/);
-});
-
-test("Fare jumps on LIVE_BOOK_LANE=eoa: book() is simulated from the agent's EOA", async () => {
-  const r = await roles;
-  const chain = await healthyChain();
-  chain.state.ethCall = escrowEthCall;
-  const { cap, after } = await fareJumps(chain, env({ LIVE_BOOK_LANE: "eoa" }));
-  assert.equal(chain.broadcasts().length, 0);
-  assert.equal((after[1].args[0] as EthCallRequest).from?.toLowerCase(), r.agent.signer.address.toLowerCase());
-  assert.equal(cap.ok, true);
+  assert.match(cap.readResult ?? "", /Budget unchanged: 10 QOR/);
 });
 
 test("Fare jumps: a book() that does not revert with FareOverCap is reported, never shown as the cap", async () => {

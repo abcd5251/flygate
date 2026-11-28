@@ -1,7 +1,6 @@
 import "server-only";
 import { windowCovers, windowValueUqor, type WindowView } from "../../../scripts/escrow/plan";
 import type { Hex } from "./chain";
-import { WINDOW_MAX_BLOCKS } from "./mandate";
 
 /**
  * EVM windows for the coin-60 signers (docs/FLOW.md): every address that sends an EVM tx needs
@@ -10,6 +9,8 @@ import { WINDOW_MAX_BLOCKS } from "./mandate";
  * one does not cover it.
  */
 
+/** A window stays open at most ~1 hour (diana makes about one block a second). */
+export const WINDOW_MAX_BLOCKS = 3_600;
 /** Gas budget per signer tx; the largest measured is book() at 351,734 (docs/FLOW.md). */
 export const SIGNER_GAS_CAP = BigInt(450_000);
 /** Txs a newly opened signer window admits, so one window serves several steps. */

@@ -37,10 +37,10 @@ contract FlightEscrowFfiTest is Test {
         MockPqcKeyStatus(PQC_KEY_STATUS).setStatus(merchant, true, 1, pubkey, true);
 
         escrow = new FlightEscrow();
-        vm.deal(agent, 10 ether);
+        vm.deal(owner, 10 ether);
 
         vm.prank(owner);
-        escrow.setMandate(
+        escrow.openMandate{value: 10 ether}(
             agent,
             FlightEscrow.Mandate({
                 merchant: merchant,
@@ -54,7 +54,8 @@ contract FlightEscrowFfiTest is Test {
                 cabin: FlightEscrow.Cabin.Business,
                 refundableOnly: false,
                 mandateHash: keccak256("mandate")
-            })
+            }),
+            10 ether
         );
     }
 
@@ -64,9 +65,9 @@ contract FlightEscrowFfiTest is Test {
         assertEq(sig.length, 4627, "ML-DSA-87 signature length");
 
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
+        escrow.book(q, sig);
 
-        assertEq(address(escrow).balance, q.priceWei, "funds locked");
+        assertEq(escrow.mandateOf(owner, agent).budget, 10 ether - q.priceWei, "price locked from the budget");
     }
 
     function test_ffi_bookRevertsWhenOneSignatureByteIsFlipped() public {
@@ -76,7 +77,7 @@ contract FlightEscrowFfiTest is Test {
 
         vm.expectRevert(FlightEscrow.InvalidSignature.selector);
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
+        escrow.book(q, sig);
     }
 
     /// A valid ML-DSA-87 signature over the right bytes, but from a key other than the
@@ -88,13 +89,13 @@ contract FlightEscrowFfiTest is Test {
 
         vm.expectRevert(FlightEscrow.InvalidSignature.selector);
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
+        escrow.book(q, sig);
     }
 
     function test_ffi_confirmTicketAcceptsRealTsTicketProof() public {
         FlightEscrow.Quote memory q = _quote();
         vm.prank(agent);
-        bytes32 bookingId = escrow.book{value: q.priceWei}(q, _signQuote(q));
+        bytes32 bookingId = escrow.book(q, _signQuote(q));
 
         FlightEscrow.TicketProof memory t = FlightEscrow.TicketProof({
             bookingId: bookingId,
@@ -115,7 +116,7 @@ contract FlightEscrowFfiTest is Test {
         FlightEscrow.Quote memory q = _quote();
         bytes memory quoteSig = _signQuote(q);
         vm.prank(agent);
-        bytes32 bookingId = escrow.book{value: q.priceWei}(q, quoteSig);
+        bytes32 bookingId = escrow.book(q, quoteSig);
 
         FlightEscrow.TicketProof memory t =
             FlightEscrow.TicketProof({bookingId: bookingId, pnrHash: keccak256("pnr"), issuedAt: 1});
@@ -127,7 +128,7 @@ contract FlightEscrowFfiTest is Test {
     function test_ffi_cancelAcceptsRealTsCancelProof() public {
         FlightEscrow.Quote memory q = _quote();
         vm.prank(agent);
-        bytes32 bookingId = escrow.book{value: q.priceWei}(q, _signQuote(q));
+        bytes32 bookingId = escrow.book(q, _signQuote(q));
 
         FlightEscrow.CancelProof memory c = FlightEscrow.CancelProof({bookingId: bookingId, reasonCode: 3});
         bytes memory sig = _signCancel(c);
@@ -136,7 +137,7 @@ contract FlightEscrowFfiTest is Test {
         emit FlightEscrow.Refunded(bookingId, FlightEscrow.RefundReason.Cancelled);
         escrow.cancel(c, sig);
 
-        assertEq(owner.balance, q.priceWei, "owner refunded");
+        assertEq(escrow.mandateOf(owner, agent).budget, 10 ether, "owner refunded to the budget");
     }
 
     // ------------------------------------------------------------------ helpers

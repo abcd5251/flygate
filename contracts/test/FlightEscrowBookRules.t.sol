@@ -10,6 +10,7 @@ contract FlightEscrowBookRulesTest is Test {
     address constant PQC_VERIFY = 0x0000000000000000000000000000000000000a01;
     address constant PQC_KEY_STATUS = 0x0000000000000000000000000000000000000a02;
     uint256 constant T0 = 1_800_000_000;
+    uint256 constant BUDGET = 10 ether;
 
     address owner = makeAddr("owner");
     address agent = makeAddr("agent");
@@ -28,8 +29,9 @@ contract FlightEscrowBookRulesTest is Test {
         MockPqcKeyStatus(PQC_KEY_STATUS).setStatus(merchant, true, 1, merchantPubkey, true);
 
         escrow = new FlightEscrow();
-        vm.deal(agent, 10 ether);
-        _setMandate(_mandate());
+        vm.deal(owner, 100 ether);
+        vm.prank(owner);
+        escrow.openMandate{value: BUDGET}(agent, _mandate(), BUDGET);
     }
 
     // ----------------------------------------------------------------- revoke
@@ -53,15 +55,15 @@ contract FlightEscrowBookRulesTest is Test {
 
     // ------------------------------------------------------------- front-run
 
-    /// Anyone can call setMandate for any agent, but it only writes the caller's own
-    /// (owner, agent) slot: the real owner's rules, quota and refunds are untouched.
+    /// Anyone can call openMandate for any agent, but it only writes the caller's own
+    /// (owner, agent) slot: the real owner's rules, quota, budget and refunds are untouched.
     function test_setMandate_byAttackerForSameAgent_cannotTouchOwnersMandateOrRefunds() public {
         address attacker = makeAddr("attacker");
         FlightEscrow.Mandate memory evil = _mandate();
         evil.maxTickets = 0;
         evil.cabin = FlightEscrow.Cabin.First;
         vm.prank(attacker);
-        escrow.setMandate(agent, evil);
+        escrow.openMandate(agent, evil, 0);
         vm.prank(attacker);
         escrow.revokeMandate(agent);
 
@@ -69,7 +71,8 @@ contract FlightEscrowBookRulesTest is Test {
 
         FlightEscrow.CancelProof memory c = FlightEscrow.CancelProof({bookingId: bookingId, reasonCode: 1});
         escrow.cancel(c, _allow(keccak256("CANCEL"), abi.encode(c), 0xC1));
-        assertEq(owner.balance, 1 ether, "refund went to the real owner");
+        assertEq(escrow.mandateOf(owner, agent).budget, BUDGET, "refund went back to the real owner's budget");
+        assertEq(escrow.mandateOf(attacker, agent).budget, 0, "attacker got nothing");
         assertEq(attacker.balance, 0, "attacker got nothing");
     }
 
@@ -212,34 +215,30 @@ contract FlightEscrowBookRulesTest is Test {
 
     function test_book_revertsWhenAnotherAgentUsesTheQuote() public {
         address thief = makeAddr("thief");
-        vm.deal(thief, 10 ether);
         vm.prank(owner);
-        escrow.setMandate(thief, _mandate());
+        escrow.openMandate{value: 1 ether}(thief, _mandate(), 1 ether);
 
         FlightEscrow.Quote memory q = _quote(); // bound to `agent`
         bytes memory sig = _signQuote(q);
         vm.expectRevert(FlightEscrow.AgentMismatch.selector);
         vm.prank(thief);
-        escrow.book{value: q.priceWei}(q, sig);
-        assertEq(thief.balance, 10 ether, "thief locked nothing");
+        escrow.book(q, sig);
+        assertEq(escrow.mandateOf(owner, thief).budget, 1 ether, "thief locked nothing");
     }
 
-    // -------------------------------------------------------------- payment
+    // -------------------------------------------------------------- budget
 
-    function test_book_revertsOnOverpay() public {
+    function test_book_revertsOnceTheBudgetIsSpent() public {
+        FlightEscrow.Mandate memory m = _mandate();
+        m.maxFareWei = BUDGET;
+        _setMandate(m);
         FlightEscrow.Quote memory q = _quote();
-        bytes memory sig = _signQuote(q);
-        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.WrongPayment.selector, q.priceWei, q.priceWei + 1));
-        vm.prank(agent);
-        escrow.book{value: q.priceWei + 1}(q, sig);
-    }
-
-    function test_book_revertsOnUnderpay() public {
-        FlightEscrow.Quote memory q = _quote();
-        bytes memory sig = _signQuote(q);
-        vm.expectRevert(abi.encodeWithSelector(FlightEscrow.WrongPayment.selector, q.priceWei, q.priceWei - 1));
-        vm.prank(agent);
-        escrow.book{value: q.priceWei - 1}(q, sig);
+        q.priceWei = BUDGET - 1 ether;
+        _bookOk(q);
+        FlightEscrow.Quote memory q2 = _quote();
+        q2.offerId = keccak256("offer-2");
+        q2.priceWei = 2 ether;
+        _expectBookRevert(q2, abi.encodeWithSelector(FlightEscrow.InsufficientBudget.selector, 1 ether, 2 ether));
     }
 
     // --------------------------------------------------------- ticket window
@@ -282,16 +281,16 @@ contract FlightEscrowBookRulesTest is Test {
     function _bookOk(FlightEscrow.Quote memory q) internal returns (bytes32) {
         bytes memory sig = _signQuote(q);
         vm.prank(agent);
-        return escrow.book{value: q.priceWei}(q, sig);
+        return escrow.book(q, sig);
     }
 
     function _expectBookRevert(FlightEscrow.Quote memory q, bytes memory reason) internal {
         bytes memory sig = _signQuote(q);
-        uint256 agentBefore = agent.balance;
+        uint256 budgetBefore = escrow.mandateOf(owner, agent).budget;
         vm.expectRevert(reason);
         vm.prank(agent);
-        escrow.book{value: q.priceWei}(q, sig);
-        assertEq(agent.balance, agentBefore, "agent keeps funds");
+        escrow.book(q, sig);
+        assertEq(escrow.mandateOf(owner, agent).budget, budgetBefore, "owner's budget untouched");
     }
 
     function _mandate() internal view returns (FlightEscrow.Mandate memory) {
@@ -327,9 +326,10 @@ contract FlightEscrowBookRulesTest is Test {
         });
     }
 
+    /// Re-sets the rules only; the budget from setUp stays.
     function _setMandate(FlightEscrow.Mandate memory m) internal {
         vm.prank(owner);
-        escrow.setMandate(agent, m);
+        escrow.openMandate(agent, m, 0);
     }
 
     function _message(bytes32 typeTag, bytes memory encodedStruct) internal view returns (bytes memory) {

@@ -110,6 +110,12 @@ export type SignedMandate = {
   agentAddress: string;
   /** The mode it was signed in: a simulated mandate never drives live txs (D-25). */
   mode: DemoMode;
+  /**
+   * Live: the owner's qor1 account and the session key this browser set the mandate with. The
+   * key's hash is in the on-chain mandateHash; FlyGate's server lets the agent book for this
+   * owner only with it. Kept in this tab's sessionStorage, never sent anywhere else.
+   */
+  live?: { owner: string; sessionKey: string; depositQor: string; budgetQor: string; shield?: string };
 };
 
 export type StepStatus = "pending" | "running" | "done" | "failed" | "skipped";
@@ -203,9 +209,8 @@ export type Scenario = "normal" | "price_change" | "order_fail";
 /** Whether on-chain steps are simulated in the browser or sent to diana by the server. */
 export type DemoMode = "simulated" | "live";
 
-/** Public addresses the Live server signs with (D-27). Never key material. */
+/** Public addresses the Live server signs with (D-27): FlyGate's agent and the merchant. Never key material. */
 export type LiveAddresses = {
-  owner: { account: { cosmos: string; evm: string }; signer: string };
   agent: { account: { cosmos: string; evm: string }; signer: string };
   merchant: { account: { cosmos: string; evm: string } };
 };

@@ -18,9 +18,17 @@ interface IPqcKeyStatus {
 }
 
 /// @title FlightEscrow
-/// @notice Holds an agent's flight payment until the merchant proves the ticket was issued.
-///         Merchant authority comes only from ML-DSA-87 signatures verified by QoreChain's
-///         PQC precompiles, so the contract can live only on diana (chain id 9800). No admin.
+/// @notice The owner deposits a travel budget together with a mandate for one agent. The agent
+///         can only move that budget into escrow, one merchant-signed quote at a time and only
+///         inside the mandate, and escrow pays the merchant only against a merchant-signed ticket
+///         proof. Anything unspent goes back to the owner, who can withdraw at any time.
+///         Merchant authority comes only from ML-DSA-87 signatures verified by QoreChain's PQC
+///         precompiles, so the contract can live only on diana (chain id 9800). No admin.
+/// @dev    Deposits arrive in two ways. An EVM caller sends them as msg.value. A QoreChain native
+///         account (a QoreX wallet) cannot: the EVM lane of MsgCrossVMCall refuses funds, so the
+///         wallet sends one transaction with a bank MsgSend to this contract followed by a
+///         MsgCrossVMCall to openMandate, which claims the balance nobody has accounted for yet.
+///         The two messages run atomically in one transaction, so no other caller can claim it.
 contract FlightEscrow {
     // ------------------------------------------------------------------ constants
 
@@ -111,6 +119,7 @@ contract FlightEscrow {
         bool exists;
         bool revoked;
         uint32 ticketsUsed; // locked + released bookings; survives re-setting the mandate
+        uint256 budget; // the owner's deposit not yet locked in a booking, in wei
         Mandate mandate;
     }
 
@@ -130,10 +139,16 @@ contract FlightEscrow {
     mapping(address owner => mapping(address agent => AgentMandate)) internal mandates;
     mapping(bytes32 bookingId => Booking) internal bookings;
 
+    /// @notice Every wei this contract owes someone: all budgets plus every Locked booking.
+    ///         `address(this).balance - totalHeld` is a deposit not claimed yet.
+    uint256 public totalHeld;
+
     // --------------------------------------------------------------------- events
 
     event MandateSet(address indexed owner, address indexed agent, address indexed merchant, bytes32 mandateHash);
     event MandateRevoked(address indexed owner, address indexed agent);
+    event Deposited(address indexed owner, address indexed agent, uint256 amount);
+    event Withdrawn(address indexed owner, address indexed agent, uint256 amount);
     event Booked(
         bytes32 indexed bookingId, address indexed agent, address indexed merchant, uint256 priceWei, uint64 deadline
     );
@@ -146,7 +161,9 @@ contract FlightEscrow {
     error NoMandate();
     error MerchantMismatch();
     error AgentMismatch();
-    error WrongPayment(uint256 expected, uint256 actual);
+    error DepositNotReceived(uint256 deposit, uint256 unclaimed);
+    error InsufficientBudget(uint256 budget, uint256 priceWei);
+    error ValueExceedsDeposit(uint256 value, uint256 deposit);
     error BookingExists(bytes32 bookingId);
     error NotLocked(bytes32 bookingId);
     error TicketDeadlinePassed(bytes32 bookingId);
@@ -173,19 +190,30 @@ contract FlightEscrow {
 
     // ------------------------------------------------------------------- mandates
 
-    /// @notice Set or overwrite the caller's mandate for `agent`. Re-setting keeps the
-    ///         used-ticket count. It also re-enables an agent the caller revoked earlier:
-    ///         signing a new mandate is how an owner undoes a revoke.
-    function setMandate(address agent, Mandate calldata mandate) external {
+    /// @notice Set or overwrite the caller's mandate for `agent` and add `deposit` wei to its
+    ///         budget. The deposit is the part of the contract's balance nobody has claimed:
+    ///         msg.value for an EVM caller, or the bank MsgSend that came just before this call
+    ///         in the same transaction for a QoreChain native account. Re-setting keeps the
+    ///         used-ticket count and the budget, and re-enables an agent the caller revoked.
+    function openMandate(address agent, Mandate calldata mandate, uint256 deposit) external payable {
+        // Sent value is never left over for someone else to claim.
+        if (msg.value > deposit) revert ValueExceedsDeposit(msg.value, deposit);
+        uint256 unclaimed = address(this).balance - totalHeld;
+        if (deposit > unclaimed) revert DepositNotReceived(deposit, unclaimed);
         AgentMandate storage m = mandates[msg.sender][agent];
         m.exists = true;
         m.mandate = mandate;
         m.revoked = false;
+        if (deposit > 0) {
+            m.budget += deposit;
+            totalHeld += deposit;
+            emit Deposited(msg.sender, agent, deposit);
+        }
         emit MandateSet(msg.sender, agent, mandate.merchant, mandate.mandateHash);
     }
 
     /// @notice Stop the agent from booking under the caller's mandate. Bookings already locked
-    ///         are unaffected; a later setMandate by the caller re-enables the agent.
+    ///         are unaffected; a later openMandate by the caller re-enables the agent.
     function revokeMandate(address agent) external {
         AgentMandate storage m = mandates[msg.sender][agent];
         if (!m.exists) revert NoMandate();
@@ -193,19 +221,42 @@ contract FlightEscrow {
         emit MandateRevoked(msg.sender, agent);
     }
 
+    /// @notice Revoke the agent and send the caller the whole unspent budget. Bookings already
+    ///         locked still settle; if one is refunded later, it goes straight to the caller.
+    function closeMandate(address agent) external {
+        AgentMandate storage m = mandates[msg.sender][agent];
+        if (!m.exists) revert NoMandate();
+        m.revoked = true;
+        emit MandateRevoked(msg.sender, agent);
+        _withdraw(m, agent, m.budget);
+    }
+
+    /// @notice Send `amount` of the caller's unspent budget for `agent` back to the caller.
+    function withdraw(address agent, uint256 amount) external {
+        AgentMandate storage m = mandates[msg.sender][agent];
+        if (!m.exists) revert NoMandate();
+        if (amount > m.budget) revert InsufficientBudget(m.budget, amount);
+        _withdraw(m, agent, amount);
+    }
+
+    /// @notice The caller-independent view of one (owner, agent) mandate.
+    function mandateOf(address owner, address agent) external view returns (AgentMandate memory) {
+        return mandates[owner][agent];
+    }
+
     // ------------------------------------------------------------------- bookings
 
-    /// @notice Lock exactly `quote.priceWei` against a merchant-signed quote, under the mandate
-    ///         `quote.owner` set for the caller. Refunds go to `quote.owner`.
-    function book(Quote calldata quote, bytes calldata signature) external payable returns (bytes32 bookingId) {
+    /// @notice Lock `quote.priceWei` of `quote.owner`'s budget against a merchant-signed quote,
+    ///         under the mandate that owner set for the caller. Refunds go back to that owner.
+    function book(Quote calldata quote, bytes calldata signature) external returns (bytes32 bookingId) {
         AgentMandate storage m = mandates[quote.owner][msg.sender];
         if (!m.exists) revert NoMandate();
         if (m.revoked) revert MandateIsRevoked();
         if (block.timestamp > m.mandate.expiresAt) revert MandateExpired();
         if (quote.agent != msg.sender) revert AgentMismatch();
         if (quote.merchant != m.mandate.merchant) revert MerchantMismatch();
-        if (msg.value != quote.priceWei) revert WrongPayment(quote.priceWei, msg.value);
         _checkMandateRules(m.mandate, quote);
+        if (m.budget < quote.priceWei) revert InsufficientBudget(m.budget, quote.priceWei);
         if (block.timestamp > quote.expiresAt) revert QuoteExpired();
         if (quote.ticketWindow < MIN_TICKET_WINDOW || quote.ticketWindow > MAX_TICKET_WINDOW) {
             revert InvalidTicketWindow(quote.ticketWindow);
@@ -220,6 +271,7 @@ contract FlightEscrow {
         uint64 deadline = uint64(block.timestamp) + quote.ticketWindow;
         if (m.ticketsUsed >= m.mandate.maxTickets) revert TicketQuotaExhausted(m.mandate.maxTickets);
         m.ticketsUsed += 1;
+        m.budget -= quote.priceWei; // still held: now as the Locked booking
         bookings[bookingId] = Booking({
             status: Status.Locked,
             owner: quote.owner,
@@ -241,6 +293,7 @@ contract FlightEscrow {
         _verifyMerchant(b.merchant, TICKET_TYPE, abi.encode(proof), signature);
 
         b.status = Status.Released;
+        totalHeld -= b.priceWei;
         emit Released(proof.bookingId, proof.pnrHash);
         _send(b.merchant, b.priceWei);
     }
@@ -281,12 +334,29 @@ contract FlightEscrow {
         if (mandate.refundableOnly && !quote.refundable) revert RefundableRequired();
     }
 
-    /// @dev Locked -> Refunded: pay the owner back and return one unit of the (owner, agent) quota.
+    /// @dev Locked -> Refunded: return one unit of the (owner, agent) quota, and the price to the
+    ///      owner's budget, so the agent can rebook. Once the owner has revoked the agent, the
+    ///      price goes straight to the owner instead.
     function _refund(bytes32 bookingId, Booking storage b, RefundReason reason) internal {
         b.status = Status.Refunded;
-        mandates[b.owner][b.agent].ticketsUsed -= 1;
+        AgentMandate storage m = mandates[b.owner][b.agent];
+        m.ticketsUsed -= 1;
         emit Refunded(bookingId, reason);
-        _send(b.owner, b.priceWei);
+        if (m.revoked) {
+            totalHeld -= b.priceWei;
+            emit Withdrawn(b.owner, b.agent, b.priceWei);
+            _send(b.owner, b.priceWei);
+        } else {
+            m.budget += b.priceWei;
+        }
+    }
+
+    function _withdraw(AgentMandate storage m, address agent, uint256 amount) internal {
+        if (amount == 0) return;
+        m.budget -= amount;
+        totalHeld -= amount;
+        emit Withdrawn(msg.sender, agent, amount);
+        _send(msg.sender, amount);
     }
 
     function _verifyMerchant(address merchant, bytes32 typeTag, bytes memory encodedStruct, bytes calldata signature)

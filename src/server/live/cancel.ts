@@ -12,8 +12,9 @@ import { errorText, type txFactory, type TxText } from "./tx";
  * Live /checkout, Booking fails (#23, D-18): after the simulated Duffel order fails, the merchant
  * signs `CancelProof{bookingId, reasonCode: 1}` with its registered ML-DSA-87 key, the agent's
  * coin-60 EOA submits `cancel()` (anyone may; the merchant's signature is the authority, D-19)
- * and FlightEscrow emits `Refunded(Cancelled)`. One balance read of the refund address (the
- * owner's EVM signer, the `setMandate` sender: D-10, ADR-0002) then shows the money came back.
+ * and FlightEscrow emits `Refunded(Cancelled)`: the price goes back to the owner's budget in
+ * FlightEscrow (or straight to the owner, once they closed the mandate). One read of that budget
+ * then shows the money came back.
  * `refund()` is not used: it waits for the ticket window and is left to `pnpm live:sweep`.
  */
 
@@ -23,6 +24,7 @@ export const CANCEL_REASON_OFFER_UNAVAILABLE = 1;
 /** The booking fields cancel() needs, as the quote step kept them. */
 export interface CancellableBooking {
   domain: Domain;
+  owner: { evm: Hex };
   priceUsd: number;
   priceUqor: bigint;
 }
@@ -32,6 +34,8 @@ export interface CancelDeps {
   tx: ReturnType<typeof txFactory>;
   keys(): Promise<LiveKeys>;
   booking(id: Hex): CancellableBooking | undefined;
+  /** The owner's budget for FlyGate's agent, in wei, read from FlightEscrow. */
+  budget(b: CancellableBooking): Promise<bigint>;
   /** Whether book() succeeded for this booking (its cached lock step). */
   locked(id: Hex): Promise<boolean>;
 }
@@ -45,12 +49,12 @@ const cancelText = (b?: CancellableBooking): TxText => ({
   msg: "FlightEscrow.cancel() · submitted by agent",
 });
 
-/** "balance(refund address 0x…) → 1.23 QOR": what the "Live read" shows. */
+/** "budget(owner 0x…) → 1.23 QOR": what the "Live read" shows. */
 export function refundBalanceText(address: Hex, wei: bigint): string {
-  return `balance(refund address ${address}) → ${formatQor(wei / WEI_PER_UQOR)}`;
+  return `mandateOf(owner ${address}).budget → ${formatQor(wei / WEI_PER_UQOR)}`;
 }
 
-export function createCancelStep({ chain, tx, keys, booking, locked }: CancelDeps) {
+export function createCancelStep({ chain, tx, keys, booking, budget, locked }: CancelDeps) {
   function refused(b: CancellableBooking | undefined, code: string, reason: string): CancelRun {
     return { broadcast: false, ok: false, response: { tx: tx.refused("merchant", cancelText(b), code, reason).tx } };
   }
@@ -66,15 +70,15 @@ export function createCancelStep({ chain, tx, keys, booking, locked }: CancelDep
     const r = tx.fromOutcome("merchant", cancelText(b), o);
     if (!r.tx.ok) return { broadcast: r.broadcast, ok: false, response: { tx: r.tx } };
 
-    // The refund goes to whoever sent setMandate: the owner's EVM signer (D-10, ADR-0002).
-    const refundTo = k.roles.owner.signer.address;
+    // The refund goes back to the owner's budget (ADR-0003).
+    const refundTo = b.owner.evm;
     try {
-      const wei = await chain.evmBalance(refundTo);
+      const wei = await budget(b);
       const balanceQor = formatQor(wei / WEI_PER_UQOR);
       return { broadcast: true, ok: true, response: { tx: r.tx, refundTo, balanceQor, readResult: refundBalanceText(refundTo, wei) } };
     } catch (err) {
       // The refund is on-chain either way; only the proof of it could not be read.
-      return { broadcast: true, ok: true, response: { tx: r.tx, refundTo, readError: `Could not read the refund address balance (${errorText(err)})` } };
+      return { broadcast: true, ok: true, response: { tx: r.tx, refundTo, readError: `Could not read the owner's budget (${errorText(err)})` } };
     }
   }
 
@@ -83,5 +87,8 @@ export function createCancelStep({ chain, tx, keys, booking, locked }: CancelDep
     return { ...refused(booking(id), "internal error", errorText(err)), broadcast: true };
   }
 
-  return { run, onError };
+  /** A refusal before anything was sent, for a caller that may not cancel this booking. */
+  const refusedFor = (id: Hex, code: string, reason: string) => refused(booking(id), code, reason);
+
+  return { run, onError, refused: refusedFor };
 }

@@ -2,10 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Wallet } from "lucide-react";
-import { ADDRESSES, shortAddr } from "@/lib/chain";
 import { useDemo } from "@/lib/store";
 import { cx } from "./ui";
+import { WalletButton } from "./WalletButton";
 
 export function Logo({ light = false }: { light?: boolean }) {
   return (
@@ -35,7 +34,6 @@ const NAV = [
 export function Header() {
   const pathname = usePathname();
   const { state } = useDemo();
-  const signed = Boolean(state.signed);
 
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-white/95 backdrop-blur">
@@ -67,17 +65,9 @@ export function Header() {
           <span className="hidden items-center gap-2 rounded-full border border-line px-3 py-1.5 text-xs text-ink-2 sm:inline-flex">
             <span className="size-2 rounded-full bg-pass" />
             QoreChain testnet
-            <span className="text-muted">· demo mode</span>
+            {state.mode !== "live" && <span className="text-muted">· demo mode</span>}
           </span>
-          <span
-            className={cx(
-              "inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium",
-              signed ? "bg-brand-50 text-brand" : "bg-canvas text-ink-2",
-            )}
-          >
-            <Wallet className="size-4" />
-            {signed ? shortAddr(ADDRESSES.owner, 7, 4) : "Wallet not connected"}
-          </span>
+          <WalletButton />
         </div>
       </div>
     </header>

@@ -1,30 +1,30 @@
 import "server-only";
-import type { ChainStatus } from "@/lib/chain";
-import { FLIGHT_ESCROW_ABI } from "@/lib/escrow";
-import { canonicalJson, defaultMandate } from "@/lib/mandate";
+import type { ChainStatus, ClosePlan, MandatePlan, OwnerState, WalletMessage } from "@/lib/chain";
 import type { ChainTx } from "@/lib/types";
 import { ALGORITHM_ML_DSA_87 } from "../../../scripts/evm/pqcKeyStatus";
-import type { BroadcastOutcome, Hex, ServerChain } from "./chain";
+import type { Hex, ServerChain } from "./chain";
 import type { LiveConfig, LiveRole } from "./config";
 import { deriveLiveKeys, mnemonicProblem, publicAddresses, type LiveKeys } from "./keys";
 import {
   BadRequest,
-  countUsedTickets,
-  LIVE_MANDATE_STEPS,
-  linkMsgs,
-  mandateLimits,
+  CLOSE_MANDATE_GAS,
+  closeMandateMessages,
+  depositForUqor,
+  mandateHashOf,
   onchainMandate,
+  OPEN_MANDATE_GAS,
+  openMandateMessages,
+  parseControlHash,
   parseMandate,
-  parseMandateHash,
-  setMandateData,
-  spentTodayUqor,
-  STEP_TIMEOUT_MS,
-  windowMsg,
-  type LiveMandateStep,
+  parseOwner,
+  readMandate,
+  WALLET_TX_TIMEOUT_MS,
+  type MandateState,
+  type OwnerAccount,
 } from "./mandate";
-import { formatQor, MAX_FEE_UQOR, usdToUqor } from "./money";
-import { bookSender, createCheckout, type CheckoutInput, type CheckoutResponse } from "./checkout";
-import { txFactory, type Clock, type StepResult } from "./tx";
+import { formatQor, WEI_PER_UQOR } from "./money";
+import { createCheckout, type CheckoutInput, type CheckoutResponse } from "./checkout";
+import { errorText, txFactory, type Clock } from "./tx";
 
 export { BadRequest };
 export type { Clock };
@@ -32,35 +32,39 @@ export type { Clock };
 export const DIANA_EVM_CHAIN_ID = 9800;
 /** How long one status result is reused (D-27). */
 export const STATUS_TTL_MS = 30_000;
-/** Owner-paid Cosmos txs per demo round (link, window); their fees come on top of the fare. */
-const OWNER_FEE_TXS = BigInt(2);
+/**
+ * Least the agent's EVM signer must hold: it pays the gas of book(), confirmTicket() and cancel()
+ * and of its own EVM windows (about 0.075 QOR per window on diana).
+ */
+export const AGENT_MIN_GAS_UQOR = BigInt(500_000);
 
 export type LiveStatus = ChainStatus & { checkedAt: number };
 
-/** POST /api/live/mandate body: structured fields only; the server builds every tx from them (D-08). */
-export interface SetupMandateInput {
-  step: unknown;
-  mandate: unknown;
-  mandateHash: unknown;
+/** POST /api/live/mandate body: structured fields only; the server builds every message itself (D-08). */
+export interface MandateInput {
+  action: unknown;
+  mandate?: unknown;
+  owner?: unknown;
+  controlHash?: unknown;
+  txHash?: unknown;
 }
 
+export type MandateResponse = MandatePlan | ClosePlan | OwnerState | ChainTx;
+
 /**
- * The server-side Live service. Its operations mirror `ChainPort`; Route Handlers are thin
- * adapters over it. /checkout runs one step per call (`checkout`); cancelBooking, checkFareCap and
- * the booking-state query arrive with #22-#24 as more checkout steps.
+ * The server-side Live service. Route Handlers are thin adapters over it. The owner's
+ * transactions are signed by the owner's own wallet; this only builds them and reads back what
+ * landed (ADR-0003). It sends only as FlyGate's agent (book, confirmTicket, cancel).
  */
 export interface LiveService {
   status(): Promise<LiveStatus>;
   /**
-   * One owner tx of a Live /mandate, in the fixed order link -> window -> mandate. Idempotent per
-   * (mandate hash, step): a repeat gets the first call's result and never broadcasts again,
-   * also after a failed broadcast. Throws BadRequest for malformed input.
+   * The owner's side of /mandate: `prepare` builds the wallet tx (deposit + openMandate),
+   * `confirm` waits for it and checks the mandate on chain, `close` builds closeMandate,
+   * `closed` waits for that, and `state` reads the owner's balance and mandate.
    */
-  setupMandate(input: SetupMandateInput): Promise<ChainTx>;
-  /**
-   * One step of a Live /checkout (quote, verify, lock, proof). Broadcasting steps are idempotent
-   * per (step, bookingId). Throws BadRequest for malformed input.
-   */
+  mandate(input: MandateInput): Promise<MandateResponse>;
+  /** One step of a Live /checkout. Broadcasting steps are idempotent per (step, bookingId). */
   checkout(input: CheckoutInput): Promise<CheckoutResponse>;
 }
 
@@ -71,6 +75,7 @@ export interface LiveServiceDeps {
 }
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const COSMOS_TX_RE = /^[0-9A-Fa-f]{64}$/;
 
 class Unavailable extends Error {}
 const fail = (reason: string): never => {
@@ -81,10 +86,13 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
+const qorNumber = (uqor: bigint) => formatQor(uqor).replace(/ QOR$/, "");
+
 export function createLiveService({ chain, config, clock }: LiveServiceDeps): LiveService {
   const explorer = config.network.explorer;
   let keys: Promise<LiveKeys> | undefined;
   let cached: { at: number; result: Promise<LiveStatus> } | undefined;
+  const txs = txFactory(clock, explorer);
 
   function liveKeys(): Promise<LiveKeys> {
     keys ??= deriveLiveKeys(config.mnemonics as Record<LiveRole, string>);
@@ -121,26 +129,17 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
       if (!pqc.possessionProven) fail("Merchant PQC key has no proof of possession");
       if (!sameBytes(pqc.pubkey, k.merchantPqc.publicKey)) fail("Merchant on-chain ML-DSA-87 key does not match MERCHANT_MNEMONIC");
 
-      const fare = usdToUqor(defaultMandate().maxFareUsd, config.uqorPerUsd);
-      const ownerNeeds = fare + MAX_FEE_UQOR * OWNER_FEE_TXS;
-      const ownerHas = await chain.bankBalance(k.roles.owner.account.cosmos);
-      if (ownerHas < ownerNeeds) {
-        fail(`Owner balance ${formatQor(ownerHas)} is below one max fare plus fees (${formatQor(ownerNeeds)})`);
-      }
-      const zero = BigInt(0);
-      if ((await chain.bankBalance(k.roles.agent.account.cosmos)) <= zero) fail("Relayer (agent account) has no balance");
-      // EVM txs come from the coin-60 signers: each needs its own registered ML-DSA-87 key.
-      for (const role of ["owner", "agent"] as const) {
-        const s = await chain.pqcKeyStatus(k.roles[role].signer.address);
-        if (!s.registered || !s.possessionProven) fail(`${role === "owner" ? "Owner" : "Agent"} EVM signer has no registered ML-DSA-87 key with proof of possession (pnpm live:probe registers it)`);
-      }
-      if ((await chain.evmBalance(k.roles.owner.signer.address)) <= zero) fail("Owner EVM signer has no balance (it sends setMandate)");
-      if ((await chain.evmBalance(k.roles.agent.signer.address)) <= zero) {
-        fail("Agent EVM signer has no balance (it sends confirmTicket and cancel)");
+      // The agent's coin-60 signer sends every server tx and pays its gas.
+      const agent = k.roles.agent.signer.address;
+      const s = await chain.pqcKeyStatus(agent);
+      if (!s.registered || !s.possessionProven) fail("Agent EVM signer has no registered ML-DSA-87 key with proof of possession (pnpm live:probe registers it)");
+      const gas = (await chain.evmBalance(agent)) / WEI_PER_UQOR;
+      if (gas < AGENT_MIN_GAS_UQOR) {
+        fail(`FlyGate's agent has ${formatQor(gas)} for gas, below ${formatQor(AGENT_MIN_GAS_UQOR)}: top up ${agent} before taking bookings`);
       }
       return { available: true, escrow, explorer, addresses };
     } catch (err) {
-      const reason = err instanceof Unavailable ? err.message : `Chain read failed: ${err instanceof Error ? err.message : String(err)}`;
+      const reason = err instanceof Unavailable ? err.message : `Chain read failed: ${errorText(err)}`;
       return { available: false, reason, escrow, explorer, addresses };
     }
   }
@@ -153,122 +152,174 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
     return cached.result;
   }
 
-  // ---------------------------------------------------------------- /mandate (#20)
-
-  /** Idempotency table: mandate hash -> the mandate it was first used with and each step's result. */
-  const sessions = new Map<Hex, { canonical: string; steps: Map<LiveMandateStep, Promise<StepResult>> }>();
-
-  const txs = txFactory(clock, explorer);
-
-  /** A failure found before anything was sent: not cached, so a later call may try again. */
-  function refused(step: LiveMandateStep, code: string, reason: string): StepResult {
-    return txs.refused("owner", STEP_TEXT[step], code, reason);
-  }
-
-  // Failed txs never get an explorer link or the "Live tx" label, only the chain's error code (D-20).
-  function fromOutcome(fields: Pick<ChainTx, "label" | "msg">, o: BroadcastOutcome): StepResult {
-    return txs.fromOutcome("owner", fields, o);
-  }
-
-  async function runStep(step: LiveMandateStep, m: ReturnType<typeof parseMandate>, mandateHash: Hex, prev?: Promise<StepResult>): Promise<StepResult> {
-    if (prev) {
-      const before = await prev;
-      if (!before.tx.ok) return refused(step, "out of order", `The previous step failed (${before.tx.code}); nothing was sent`);
-    }
+  /** The escrow and agent when Live can run, else why not. */
+  async function live(): Promise<{ escrow: Hex; k: LiveKeys } | { code: string; reason: string }> {
     const st = await status();
-    if (!st.available || !st.escrow) return refused(step, "live unavailable", st.reason ?? "Live is unavailable");
-    const escrow = st.escrow as Hex;
-    const k = await liveKeys();
-    const owner = k.roles.owner.account;
-    let limits = mandateLimits(m, config.uqorPerUsd, clock.now());
-    if (limits.windowBlocks < 1) return refused(step, "mandate expired", "The mandate expires before a window could open; nothing was sent");
-
-    // Tickets used so far (D-29), and on link what the agent key spent today (D-13). Read before
-    // the first broadcast, and again for setMandate. Only the authenticator lane books through
-    // the linked key, so only it reads the owner account's MsgExecuteEVM history.
-    let used: number | undefined;
-    if (step === "link" || step === "mandate") {
-      if (config.deployBlock === undefined) {
-        return refused(step, "ticket count unknown", "FLIGHT_ESCROW_DEPLOY_BLOCK is not set, so the tickets already used cannot be counted; nothing was sent");
-      }
-      try {
-        const executed = config.lane === "authenticator" ? await chain.executedEvmCalls(owner.cosmos) : [];
-        used = await countUsedTickets(chain, escrow, config.deployBlock, bookSender(config.lane, k), executed);
-        limits = { ...limits, dailyLimit: limits.dailyLimit + spentTodayUqor(executed, clock.now()) };
-      } catch (err) {
-        const why = err instanceof Error ? err.message : String(err);
-        return refused(step, "ticket count unknown", `Could not read the bookings made so far (${why}), so the tickets already used are unknown; nothing was sent`);
-      }
-    }
-
-    const opts = { timeoutMs: STEP_TIMEOUT_MS };
-    switch (step) {
-      case "link": {
-        let alreadyLinked: boolean;
-        try {
-          const agentKey = k.roles.agent.signer.address.slice(2).toLowerCase();
-          alreadyLinked = (await chain.linkedKeys(owner.cosmos)).some((l) => l.pubkeyHex === agentKey && !l.revoked);
-        } catch (err) {
-          return refused(step, "rpc error", `Could not read the owner's linked keys: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        const msgs = linkMsgs({ owner: owner.cosmos, chainId: config.network.chainId, agentSigner: k.roles.agent.signer, escrow, limits, alreadyLinked });
-        const fields = alreadyLinked
-          ? { label: "Update spending rule (agent key already linked)", msg: "MsgUpdateSpendingRules" }
-          : STEP_TEXT.link;
-        return fromOutcome(fields, await chain.sendCosmos("owner", msgs, opts));
-      }
-      case "window":
-        return fromOutcome(STEP_TEXT.window, await chain.sendCosmos("owner", [windowMsg({ owner: owner.cosmos, escrow, maxTickets: m.maxTickets, limits })], opts));
-      case "mandate": {
-        const mandate = onchainMandate(m, { merchant: k.roles.merchant.account.evm, used: used!, uqorPerUsd: config.uqorPerUsd, mandateHash });
-        // agent = book()'s msg.sender: the owner account's 0x address on the authenticator lane
-        // (ADR-0002), the agent's EOA on the eoa lane (D-11).
-        const data = setMandateData(bookSender(config.lane, k), mandate);
-        return fromOutcome(STEP_TEXT.mandate, await chain.sendEvm("owner", { to: escrow, data, errorAbi: FLIGHT_ESCROW_ABI }, opts));
-      }
-    }
+    if (!st.available || !st.escrow) return { code: "live unavailable", reason: st.reason ?? "Live is unavailable" };
+    return { escrow: st.escrow as Hex, k: await liveKeys() };
   }
 
-  async function setupMandate(input: SetupMandateInput): Promise<ChainTx> {
-    const step = input.step;
-    if (typeof step !== "string" || !(LIVE_MANDATE_STEPS as readonly string[]).includes(step)) {
-      throw new BadRequest(`step must be one of ${LIVE_MANDATE_STEPS.join(", ")}`);
-    }
-    const s = step as LiveMandateStep;
+  // ---------------------------------------------------------------- /mandate (owner's wallet)
+
+  const request = (messages: WalletMessage[], gasLimit: number, memo: string) => ({ chainId: config.network.chainId, messages, gasLimit, memo });
+
+  async function prepare(input: MandateInput): Promise<MandatePlan> {
     const m = parseMandate(input.mandate);
-    const hash = parseMandateHash(input.mandateHash);
-    const canonical = canonicalJson(m);
-
-    let session = sessions.get(hash);
-    if (session && session.canonical !== canonical) {
-      return refused(s, "mandate mismatch", "This mandate hash was already used with a different mandate; nothing was sent").tx;
+    const owner = parseOwner(input.owner);
+    const controlHash = parseControlHash(input.controlHash);
+    if (Date.parse(m.expiresAt) <= clock.now()) return { ok: false, code: "mandate expired", reason: "The mandate's expiry is in the past; pick a later one" };
+    const l = await live();
+    if (!("escrow" in l)) return { ok: false, ...l };
+    const agent = l.k.roles.agent.signer.address;
+    let current: MandateState;
+    try {
+      current = await readMandate(chain, l.escrow, owner.evm, agent);
+    } catch (err) {
+      return { ok: false, code: "rpc error", reason: `Could not read your current mandate: ${errorText(err)}` };
     }
-    const existing = session?.steps.get(s);
-    if (existing) return (await existing).tx;
-
-    const i = LIVE_MANDATE_STEPS.indexOf(s);
-    const prev = i > 0 ? session?.steps.get(LIVE_MANDATE_STEPS[i - 1]) : undefined;
-    if (i > 0 && !prev) {
-      return refused(s, "out of order", `Send "${LIVE_MANDATE_STEPS[i - 1]}" first; nothing was sent`).tx;
-    }
-    if (!session) {
-      session = { canonical, steps: new Map() };
-      sessions.set(hash, session);
-    }
-    // Sends never throw (ServerChain contract), so an exception is unexpected: keep it like a
-    // failed broadcast rather than risk sending twice.
-    const run = runStep(s, m, hash, prev).catch((err): StepResult => ({
-      ...refused(s, "internal error", err instanceof Error ? err.message : String(err)),
-      broadcast: true,
-    }));
-    session.steps.set(s, run);
-    const result = await run;
-    // Only results of a broadcast are kept: a refusal before sending may be tried again.
-    if (!result.broadcast && session.steps.get(s) === run) session.steps.delete(s);
-    return result.tx;
+    const mandateHash = mandateHashOf({ mandate: m, owner: owner.evm, agent, controlHash });
+    const onchain = onchainMandate(m, { merchant: l.k.roles.merchant.account.evm, used: current.ticketsUsed, uqorPerUsd: config.uqorPerUsd, mandateHash });
+    // Top the budget up to what this mandate can spend; never deposit more than that.
+    const need = depositForUqor(m, config.uqorPerUsd);
+    const have = current.budgetWei / WEI_PER_UQOR;
+    const depositUqor = need > have ? need - have : BigInt(0);
+    return {
+      ok: true,
+      request: request(openMandateMessages({ owner, escrow: l.escrow, agent, mandate: onchain, depositUqor }), OPEN_MANDATE_GAS, "FlyGate: deposit + flight mandate"),
+      mandateHash,
+      owner,
+      agent,
+      escrow: l.escrow,
+      depositQor: qorNumber(depositUqor),
+      budgetQor: qorNumber(have + depositUqor),
+      ticketsUsed: current.ticketsUsed,
+    };
   }
 
-  // ---------------------------------------------------------------- /checkout (#21)
+  /** Waits for the owner's wallet tx. A ChainTx failure when it did not land as code 0. */
+  async function walletTx(txHash: string, text: { label: string; msg: string }): Promise<ChainTx | undefined> {
+    let included;
+    try {
+      included = await chain.cosmosTx(txHash, WALLET_TX_TIMEOUT_MS);
+    } catch (err) {
+      return txs.refused("owner", text, "rpc error", `Could not read your wallet's transaction ${txHash}: ${errorText(err)}`).tx;
+    }
+    if (!included) return txs.refused("owner", text, "timeout", `Your wallet's transaction ${txHash} was not included within ${WALLET_TX_TIMEOUT_MS / 1000} s`).tx;
+    if (included.code !== 0) {
+      return txs.fromOutcome("owner", text, { status: "reverted", lane: "cosmos", hash: txHash, code: `code ${included.code}`, reason: included.rawLog ?? "" }).tx;
+    }
+    return undefined;
+  }
+
+  function parseTxHash(raw: unknown): string {
+    if (typeof raw !== "string" || !COSMOS_TX_RE.test(raw)) throw new BadRequest("txHash must be a 64-character hex Cosmos tx hash");
+    return raw.toUpperCase();
+  }
+
+  const OPEN_TEXT = { label: "Deposit + mandate (signed in QoreX)", msg: "MsgSend + MsgCrossVMCall → FlightEscrow.openMandate()" };
+  const CLOSE_TEXT = { label: "Close mandate + withdraw (signed in QoreX)", msg: "MsgCrossVMCall → FlightEscrow.closeMandate()" };
+
+  async function confirm(input: MandateInput): Promise<ChainTx> {
+    const m = parseMandate(input.mandate);
+    const owner = parseOwner(input.owner);
+    const controlHash = parseControlHash(input.controlHash);
+    const txHash = parseTxHash(input.txHash);
+    const l = await live();
+    if (!("escrow" in l)) return txs.refused("owner", OPEN_TEXT, l.code, l.reason).tx;
+    const failed = await walletTx(txHash, OPEN_TEXT);
+    if (failed) return failed;
+    const agent = l.k.roles.agent.signer.address;
+    const expected = mandateHashOf({ mandate: m, owner: owner.evm, agent, controlHash });
+    let state: MandateState;
+    try {
+      state = await readMandate(chain, l.escrow, owner.evm, agent);
+    } catch (err) {
+      return txs.refused("owner", OPEN_TEXT, "rpc error", `Your transaction landed, but the mandate could not be read back: ${errorText(err)}`).tx;
+    }
+    if (!state.exists || state.revoked || state.mandateHash.toLowerCase() !== expected) {
+      return txs.refused("owner", OPEN_TEXT, "mandate mismatch", `Your transaction ${txHash} landed, but FlightEscrow does not hold this mandate for your account`).tx;
+    }
+    return txs.fromOutcome("owner", OPEN_TEXT, { status: "success", lane: "cosmos", hash: txHash }).tx;
+  }
+
+  async function close(input: MandateInput): Promise<ClosePlan> {
+    const owner = parseOwner(input.owner);
+    const l = await live();
+    if (!("escrow" in l)) return { ok: false, ...l };
+    const agent = l.k.roles.agent.signer.address;
+    try {
+      const state = await readMandate(chain, l.escrow, owner.evm, agent);
+      if (!state.exists) return { ok: false, code: "no mandate", reason: "Your account has no mandate for FlyGate's agent" };
+      return {
+        ok: true,
+        request: request(closeMandateMessages({ owner, escrow: l.escrow, agent }), CLOSE_MANDATE_GAS, "FlyGate: close mandate + withdraw"),
+        refundQor: qorNumber(state.budgetWei / WEI_PER_UQOR),
+      };
+    } catch (err) {
+      return { ok: false, code: "rpc error", reason: `Could not read your mandate: ${errorText(err)}` };
+    }
+  }
+
+  async function closed(input: MandateInput): Promise<ChainTx> {
+    const owner = parseOwner(input.owner);
+    const txHash = parseTxHash(input.txHash);
+    const l = await live();
+    if (!("escrow" in l)) return txs.refused("owner", CLOSE_TEXT, l.code, l.reason).tx;
+    const failed = await walletTx(txHash, CLOSE_TEXT);
+    if (failed) return failed;
+    try {
+      const state = await readMandate(chain, l.escrow, owner.evm, l.k.roles.agent.signer.address);
+      if (!state.revoked) return txs.refused("owner", CLOSE_TEXT, "still open", `Your transaction ${txHash} landed, but the mandate is still open`).tx;
+    } catch (err) {
+      return txs.refused("owner", CLOSE_TEXT, "rpc error", `Your transaction landed, but the mandate could not be read back: ${errorText(err)}`).tx;
+    }
+    return txs.fromOutcome("owner", CLOSE_TEXT, { status: "success", lane: "cosmos", hash: txHash }).tx;
+  }
+
+  async function ownerState(input: MandateInput): Promise<OwnerState> {
+    const owner: OwnerAccount = parseOwner(input.owner);
+    const l = await live();
+    if (!("escrow" in l)) return { ok: false, ...l };
+    try {
+      const [balance, state] = await Promise.all([chain.bankBalance(owner.cosmos), readMandate(chain, l.escrow, owner.evm, l.k.roles.agent.signer.address)]);
+      return {
+        ok: true,
+        owner,
+        balanceQor: qorNumber(balance),
+        mandate: state.exists
+          ? {
+              revoked: state.revoked,
+              budgetQor: qorNumber(state.budgetWei / WEI_PER_UQOR),
+              ticketsUsed: state.ticketsUsed,
+              maxTickets: state.maxTickets,
+              mandateHash: state.mandateHash,
+              expiresAt: Number(state.expiresAt),
+            }
+          : undefined,
+      };
+    } catch (err) {
+      return { ok: false, code: "rpc error", reason: `Could not read your account: ${errorText(err)}` };
+    }
+  }
+
+  async function mandate(input: MandateInput): Promise<MandateResponse> {
+    switch (input.action) {
+      case "prepare":
+        return prepare(input);
+      case "confirm":
+        return confirm(input);
+      case "close":
+        return close(input);
+      case "closed":
+        return closed(input);
+      case "state":
+        return ownerState(input);
+      default:
+        throw new BadRequest("action must be one of prepare, confirm, close, closed, state");
+    }
+  }
+
+  // ---------------------------------------------------------------- /checkout
 
   const checkoutSteps = createCheckout({
     chain,
@@ -282,12 +333,5 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
     },
   });
 
-  return { status, setupMandate, checkout: checkoutSteps.checkout };
+  return { status, mandate, checkout: checkoutSteps.checkout };
 }
-
-const STEP_TEXT: Record<LiveMandateStep, Pick<ChainTx, "label" | "msg">> = {
-  link: { label: "Link agent key + spending rule", msg: "MsgUpdateSpendingRules + MsgRegisterAuthenticator" },
-  window: { label: "Open scoped window", msg: "MsgOpenEVMWindow" },
-  mandate: { label: "Write mandate on-chain", msg: "FlightEscrow.setMandate()" },
-};
-

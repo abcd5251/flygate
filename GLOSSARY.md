@@ -22,14 +22,22 @@ _Avoid_: dry run
 The owner's signed spending rules for one agent; its registration in FlightEscrow is the **on-chain mandate**.
 _Avoid_: authorization, policy
 
-**Linked agent key** (proposed, live-checkout/D-09):
-The agent's key, bound to the owner's account as an authenticator with spending rules, that authorizes bookings without being able to spend freely.
+**Budget** (ADR-0003):
+The QOR the owner deposits into FlightEscrow with a mandate; the agent can only lock it into bookings that pass the mandate, and the owner withdraws what is unspent.
+_Avoid_: allowance, balance
+
+**Session key** (ADR-0003):
+A random key the owner's browser makes when it signs a mandate; its hash is part of the on-chain mandateHash, and FlyGate's server makes the agent act for an owner only with it.
+_Avoid_: login token, API key
+
+**Linked agent key** (superseded by ADR-0003):
+The agent's key bound to the owner's account as an authenticator; QoreX does not let a website set this up, so Live no longer uses it.
 _Avoid_: session key, agent wallet
 
 **Relayer** (proposed, live-checkout/D-09):
-The account that broadcasts and pays fees for a transaction another key authorized.
+The account that broadcasts and pays fees for a transaction another key authorized. In Live, FlyGate's agent pays the fees of every agent and merchant step.
 _Avoid_: submitter, sponsor
 
 **Scoped window** (proposed, live-checkout/D-12):
-A bounded, time-limited permission opened by the owner that limits which contract EVM transactions may reach and how much they may spend.
+A bounded, time-limited permission that limits which contract an account's EVM transactions may reach and how much they may spend. Only FlyGate's own signers open one now; an owner's QoreX wallet never needs one (ADR-0003).
 _Avoid_: session, allowance

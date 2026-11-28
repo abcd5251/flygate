@@ -18,8 +18,11 @@ type Props = {
   onDone: () => void;
   onClose: () => void;
   danger?: boolean;
-  /** Who signs the chain txs: the simulated wallet, or the Demo owner key on the server (Live, D-06). */
-  signer?: "simulated" | "server";
+  /**
+   * Who signs the owner's chain txs: the simulated wallet, or (Live) the owner's own QoreX
+   * wallet, which opens its own approval window from a step (ADR-0003).
+   */
+  signer?: "simulated" | "wallet";
   /** Live: the owner's addresses (payment and refund), shown instead of the demo account. */
   accounts?: Array<{ k: string; v: string }>;
   /** When set, a failed step offers this button: it calls onFallback, then signs again from the start. */
@@ -28,8 +31,9 @@ type Props = {
 };
 
 /**
- * Simulated QoreX wallet. Signing steps call real ML-DSA / ML-KEM code via runStep; a step that
- * throws is marked failed with the error (e.g. a Live tx's chain error code).
+ * The signing review. Simulated: a stand-in QoreX wallet whose steps call real ML-DSA / ML-KEM
+ * code. Live: FlyGate's review of what the owner's real QoreX wallet will be asked to approve; a
+ * step opens QoreX. A step that throws is marked failed with the error (e.g. a chain error code).
  */
 export function WalletModal({ open, title, summary, steps, runStep, onDone, onClose, danger, signer = "simulated", accounts, fallbackLabel, onFallback }: Props) {
   const [phase, setPhase] = useState<"review" | "signing" | "done" | "failed">("review");
@@ -102,9 +106,9 @@ export function WalletModal({ open, title, summary, steps, runStep, onDone, onCl
         <div className="flex items-center justify-between bg-night px-5 py-3 text-white">
           <span className="inline-flex items-center gap-2 text-sm font-bold">
             <span className="grid size-6 place-items-center rounded-md bg-pq text-[11px] font-black">Q</span>
-            QoreX Wallet
+            {signer === "wallet" ? "Review before QoreX" : "QoreX Wallet"}
             <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-medium text-white/70">
-              {signer === "server" ? "Demo owner key (server)" : "Simulated"}
+              {signer === "wallet" ? "Your wallet signs" : "Simulated"}
             </span>
           </span>
           <button type="button" onClick={close} aria-label="Close" className="text-white/60 hover:text-white">
@@ -114,7 +118,7 @@ export function WalletModal({ open, title, summary, steps, runStep, onDone, onCl
 
         <div className="space-y-4 p-5">
           <div>
-            <p className="text-xs text-muted">flygate.app requests a signature</p>
+            <p className="text-xs text-muted">{signer === "wallet" ? "QoreX will ask you to approve one transaction" : "flygate.app requests a signature"}</p>
             <h2 className="mt-1 text-lg font-bold text-ink">{title}</h2>
             {accounts ? (
               <dl className="mt-1 space-y-0.5 text-xs">
@@ -216,7 +220,7 @@ export function WalletModal({ open, title, summary, steps, runStep, onDone, onCl
             >
               {phase === "review" && (
                 <>
-                  <ShieldCheck className="size-4" /> Sign
+                  <ShieldCheck className="size-4" /> {signer === "wallet" ? "Continue in QoreX" : "Sign"}
                 </>
               )}
               {phase === "signing" && (

@@ -3,8 +3,8 @@ import { decodeErrorResult } from "viem";
 import type { FareCapCheck } from "@/lib/chain";
 import { encodeBook, FLIGHT_ESCROW_ABI, type Domain, type Quote } from "@/lib/escrow";
 import type { Hex, ServerChain } from "./chain";
-import type { BookLane } from "./config";
 import type { LiveKeys } from "./keys";
+import { readMandate } from "./mandate";
 import { formatQor, WEI_PER_UQOR } from "./money";
 import { errorText } from "./tx";
 
@@ -13,14 +13,11 @@ export interface FareCapBooking {
   quote: Quote;
   signature: Hex;
   domain: Domain;
-  lane: BookLane;
 }
 
 export interface FareCapDeps {
   chain: ServerChain;
   keys(): Promise<LiveKeys>;
-  /** msg.sender of book() on the booking's lane. */
-  sender(lane: BookLane, keys: LiveKeys): Hex;
 }
 
 /** "4000000000000000000 wei (4 QOR)". */
@@ -29,25 +26,20 @@ const weiText = (wei: bigint) => `${wei} wei (${formatQor(wei / WEI_PER_UQOR)})`
 /**
  * Fare jumps in Live mode (D-17): after the off-chain gate refused the quote, show that the
  * contract refuses it too, without spending anything. book() is simulated with eth_call (the
- * signed quote, msg.value = its price, from the lane's sender) and must answer
- * `FareOverCap(maxFareWei, priceWei)`. The owner's balance is read before and after. Nothing
- * is signed or broadcast, so this is a "Live read" without a hash.
+ * signed quote, from FlyGate's agent) and must answer `FareOverCap(maxFareWei, priceWei)`. The
+ * owner's budget in FlightEscrow is read before and after. Nothing is signed or broadcast, so
+ * this is a "Live read" without a hash.
  */
-export async function fareCapCheck({ chain, keys, sender }: FareCapDeps, b: FareCapBooking): Promise<FareCapCheck> {
+export async function fareCapCheck({ chain, keys }: FareCapDeps, b: FareCapBooking): Promise<FareCapCheck> {
   const failed = (code: string, detail: string): FareCapCheck => ({ source: "live", ok: false, code, detail });
   try {
-    const k = await keys();
-    const owner = k.roles.owner.account.cosmos;
-    const before = await chain.bankBalance(owner);
-    const r = await chain.ethCall({
-      to: b.domain.escrow,
-      data: encodeBook(b.quote, b.signature),
-      from: sender(b.lane, k),
-      value: b.quote.priceWei,
-    });
-    const after = await chain.bankBalance(owner);
+    const agent = (await keys()).roles.agent.signer.address;
+    const budgetOf = async () => (await readMandate(chain, b.domain.escrow, b.quote.owner, agent)).budgetWei / WEI_PER_UQOR;
+    const before = await budgetOf();
+    const r = await chain.ethCall({ to: b.domain.escrow, data: encodeBook(b.quote, b.signature), from: agent });
+    const after = await budgetOf();
 
-    const balance = before === after ? `Balance unchanged: ${formatQor(after)}` : `Balance changed: ${formatQor(before)} → ${formatQor(after)}`;
+    const balance = before === after ? `Budget unchanged: ${formatQor(after)}` : `Budget changed: ${formatQor(before)} → ${formatQor(after)}`;
     if (r.status === "success") return failed("not rejected", `book() eth_call did not revert: the contract would accept this quote · ${balance}`);
 
     let error: { errorName: string; args?: readonly unknown[] } | undefined;
