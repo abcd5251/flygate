@@ -128,6 +128,11 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
       }
       const zero = BigInt(0);
       if ((await chain.bankBalance(k.roles.agent.account.cosmos)) <= zero) fail("Relayer (agent account) has no balance");
+      // EVM txs come from the coin-60 signers: each needs its own registered ML-DSA-87 key.
+      for (const role of ["owner", "agent"] as const) {
+        const s = await chain.pqcKeyStatus(k.roles[role].signer.address);
+        if (!s.registered || !s.possessionProven) fail(`${role === "owner" ? "Owner" : "Agent"} EVM signer has no registered ML-DSA-87 key with proof of possession (pnpm live:probe registers it)`);
+      }
       if ((await chain.evmBalance(k.roles.owner.signer.address)) <= zero) fail("Owner EVM signer has no balance (it sends setMandate)");
       if ((await chain.evmBalance(k.roles.agent.signer.address)) <= zero) {
         fail("Agent EVM signer has no balance (it sends confirmTicket and cancel)");
@@ -184,10 +189,10 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
         return refused(step, "ticket count unknown", "FLIGHT_ESCROW_DEPLOY_BLOCK is not set, so the tickets already used cannot be counted; nothing was sent");
       }
       try {
-        used = await countUsedTickets(chain, escrow, config.deployBlock, bookSender(config.lane, k));
+        used = await countUsedTickets(chain, escrow, config.deployBlock, bookSender(config.lane, k), config.lane === "authenticator" ? owner.cosmos : undefined);
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
-        return refused(step, "ticket count unknown", `Could not read Booked/Refunded logs (${why}), so the tickets already used are unknown; nothing was sent`);
+        return refused(step, "ticket count unknown", `Could not read the bookings made so far (${why}), so the tickets already used are unknown; nothing was sent`);
       }
     }
 

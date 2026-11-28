@@ -71,7 +71,9 @@ export default function MandatePage() {
 
   async function runStep(i: number) {
     if (i === 0) {
-      const r = await signAsOwner({ mandate: m, ...parties() });
+      // A fresh nonce per signing: the Live server keeps each step's tx per mandate hash, so a
+      // repeat round (or a retry after a failed step) must get a new hash to send again.
+      const r = await signAsOwner({ mandate: m, ...parties(), nonce: crypto.randomUUID() });
       signRef.current = r;
       return `${r.sigBytes.toLocaleString()} bytes · ${r.ms} ms · ${r.verified ? "verified" : "failed"}`;
     }

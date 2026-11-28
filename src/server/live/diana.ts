@@ -5,11 +5,14 @@ import {
   assertAuthenticatorExecutionsSucceeded,
   AuthenticatorExecutionError,
   classifyEvmWindowRejection,
+  deriveUnifiedAccount,
   fetchAuthenticators,
+  fetchEvmWindow,
   fetchAuthNonce,
   resolveEvmAuthDigestVersion,
   QoreTxError,
   type TxClient,
+  type UnifiedAccount,
 } from "@qorechain/sdk";
 import {
   BaseError,
@@ -26,11 +29,14 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { balanceOf, connect, deriveRole, makeClient, retrying } from "../../../scripts/bootstrap/chain";
 import { deriveEvmRole } from "../../../scripts/evm/keys";
+import { openSignerWindow } from "../../../scripts/live/eth-native";
 import { decodePqcKeyStatus, encodePqcKeyStatusCall, PQC_KEY_STATUS_ADDRESS } from "../../../scripts/evm/pqcKeyStatus";
 import type { BroadcastOutcome, CosmosMsg, EthCallResult, EvmLog, Hex, ServerChain } from "./chain";
 import type { LiveNetwork, LiveRole } from "./config";
 import { withExtraGas } from "./fee";
+import { executedEvmCallsOf, type TxResponse } from "./executed-calls";
 import { linkedKeysOrNone } from "./linked-keys";
+import { signerWindowToOpen } from "./signer-window";
 
 /** Longest a single read may take before it counts as an RPC error. */
 const READ_TIMEOUT_MS = 10_000;
@@ -58,6 +64,30 @@ async function evmRead<T>(url: string, method: string, params: unknown[]): Promi
 }
 
 const toHexQty = (n: bigint) => `0x${n.toString(16)}`;
+
+/** Txs per page of the Cosmos tx search (the SDK caps a page at 100). */
+const TX_PAGE_LIMIT = 100;
+
+/**
+ * Every tx whose messages `sender` signed, oldest first, through the Cosmos tx search. Reads
+ * every page, retried on rate limiting only; throws when any page cannot be read (a pruned node
+ * answers "height … is not available").
+ */
+async function txsSentBy(rest: string, sender: string): Promise<TxResponse[]> {
+  const out: TxResponse[] = [];
+  for (let page = 1; ; page++) {
+    const q = new URLSearchParams({ query: `message.sender='${sender}'`, order_by: "ORDER_BY_ASC", page: String(page), limit: String(TX_PAGE_LIMIT) });
+    const body = await retrying(async () => {
+      const res = await fetch(`${rest}/cosmos/tx/v1beta1/txs?${q}`, { signal: AbortSignal.timeout(READ_TIMEOUT_MS), cache: "no-store" });
+      const json = (await res.json().catch(() => ({}))) as { tx_responses?: TxResponse[]; total?: string; message?: string };
+      if (!res.ok) throw new Error(`tx search: HTTP ${res.status}${json.message ? `: ${json.message}` : ""}`);
+      return json;
+    });
+    const txs = body.tx_responses ?? [];
+    out.push(...txs);
+    if (txs.length < TX_PAGE_LIMIT || out.length >= Number(body.total ?? 0)) return out;
+  }
+}
 
 /**
  * eth_call at latest. A JSON-RPC error that carries revert data (or says "reverted") is the
@@ -131,6 +161,7 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
   const pub = createPublicClient({ chain: evmChain, transport: http(url, { retryCount: 0 }) }) as PublicClient;
   const txClients = new Map<LiveRole, Promise<TxClient>>();
   const wallets = new Map<LiveRole, Promise<WalletClient>>();
+  const unified = new Map<LiveRole, Promise<UnifiedAccount>>();
 
   function mnemonic(role: LiveRole): string {
     const m = mnemonics[role];
@@ -155,6 +186,41 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
       wallets.set(role, w);
     }
     return w;
+  }
+  /** The coin-60 signer as an eth-native Cosmos account (it signs its own MsgOpenEVMWindow). */
+  function signerAccount(role: LiveRole): Promise<UnifiedAccount> {
+    let u = unified.get(role);
+    if (!u) {
+      u = deriveUnifiedAccount(mnemonic(role));
+      u.catch(() => unified.delete(role));
+      unified.set(role, u);
+    }
+    return u;
+  }
+
+  /**
+   * Opens an EVM window on `role`'s signer unless the open one covers this tx. Undefined when the
+   * tx may be sent; otherwise the failed window tx's outcome (never resent, the EVM tx is not sent).
+   */
+  async function ensureSignerWindow(role: LiveRole, to: Hex, value: bigint, maxFeePerGas: bigint, timeoutMs: number): Promise<BroadcastOutcome | undefined> {
+    const lane = "cosmos" as const;
+    let who: UnifiedAccount;
+    let open: ReturnType<typeof signerWindowToOpen>;
+    try {
+      who = await signerAccount(role);
+      const current = await retrying(() => fetchEvmWindow({ rest: network.rest, address: who.cosmos }));
+      open = signerWindowToOpen(current, { to, value }, maxFeePerGas);
+    } catch (err) {
+      return { status: "failed", lane, code: "evm window unknown", reason: `Could not read the ${role} signer's EVM window: ${errorText(err)}` };
+    }
+    if (!open) return undefined;
+    try {
+      await within(openSignerWindow({ client, rest: network.rest, chainId: network.chainId }, who, open), timeoutMs);
+      return undefined;
+    } catch (err) {
+      if (err instanceof Timeout) return { status: "timeout", lane, code: "evm window timeout", reason: `${role} signer window: ${err.message}` };
+      return { status: "failed", lane, code: "evm window open failed", reason: `${role} signer window: ${errorText(err)}` };
+    }
   }
 
   return {
@@ -187,6 +253,9 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
         for (const l of logs) out.push({ ...l, blockNumber: BigInt(l.blockNumber) });
       }
       return out;
+    },
+    async executedEvmCalls(account) {
+      return executedEvmCallsOf(await txsSentBy(network.rest, account), account);
     },
     async linkedKeys(cosmos) {
       const keys = await linkedKeysOrNone(() => retrying(() => fetchAuthenticators({ rest: network.rest, address: cosmos })));
@@ -247,13 +316,23 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
     async sendEvm(from, req, opts): Promise<BroadcastOutcome> {
       const lane = "evm" as const;
       const deadline = Date.now() + opts.timeoutMs;
+      const value = req.value ?? BigInt(0);
+      let fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
+      try {
+        fees = await retrying(() => pub.estimateFeesPerGas());
+      } catch (err) {
+        return { status: "failed", lane, code: "rpc error", reason: `Could not read EVM fees: ${errorText(err)}` };
+      }
+      // The signer's own window must admit this tx; the fees it was sized for are the tx's.
+      const windowFailure = await ensureSignerWindow(from, req.to, value, fees.maxFeePerGas, opts.timeoutMs);
+      if (windowFailure) return windowFailure;
       let hash: Hex;
       try {
         const w = await wallet(from);
         // viem estimates gas first: a revert there means nothing was broadcast.
         hash = await within(
-          w.sendTransaction({ account: w.account!, chain: evmChain, to: req.to, data: req.data, value: req.value ?? BigInt(0) }),
-          opts.timeoutMs,
+          w.sendTransaction({ account: w.account!, chain: evmChain, to: req.to, data: req.data, value, ...fees }),
+          Math.max(1, deadline - Date.now()),
         );
       } catch (err) {
         if (err instanceof Timeout) return { status: "timeout", lane, code: "timeout", reason: err.message };

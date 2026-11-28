@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { encodeAbiParameters, encodeEventTopics, type Hex } from "viem";
+import { encodeAbiParameters, encodeEventTopics, pad, type Hex } from "viem";
 import type { BookingStateResult, CheckoutQuote } from "@/lib/chain";
-import { FLIGHT_ESCROW_ABI } from "@/lib/escrow";
+import { bookingId, Cabin, encodeBook, FLIGHT_ESCROW_ABI, type Quote } from "@/lib/escrow";
 import { defaultMandate } from "@/lib/mandate";
 import { DEMO_OFFERS } from "@/lib/offers";
 import { readLiveConfig, type Env } from "./config";
@@ -10,7 +10,7 @@ import type { EvmLog } from "./chain";
 import type { FakeChain } from "./fake-chain";
 import { handleLiveCheckout } from "./http";
 import { createLiveService } from "./service";
-import { DEPLOY_BLOCK, env, ESCROW, healthyChain } from "./test-fixtures";
+import { DEPLOY_BLOCK, env, ESCROW, healthyChain, roles } from "./test-fixtures";
 
 const NOW_MS = Date.parse("2026-12-01T00:00:00Z");
 const OFFER = DEMO_OFFERS.find((o) => o.id === "off_fa802")!;
@@ -120,6 +120,73 @@ test("booking state: unreadable logs or no deploy block is an honest failure, no
   const r3 = await stateOf(down, ID, env({ FLIGHT_ESCROW_ADDRESS: "" }));
   assert.equal(!r3.ok && r3.code, "live unavailable");
   for (const c of [chain, noBlock, down]) assert.equal(c.broadcasts().length, 0);
+});
+
+// ------------------------------------------------------------------ book() via the linked agent key
+
+/** A quote booked through MsgExecuteEVM: its Booked log never reaches eth_getLogs. */
+const QUOTE: Quote = {
+  merchant: MERCHANT,
+  agent: AGENT,
+  owner: AGENT,
+  offerId: pad("0x01", { size: 32 }),
+  priceWei: BigInt(389) * BigInt(10) ** BigInt(16),
+  origin: "TPE",
+  destination: "NRT",
+  departDay: 20807,
+  cabin: Cabin.Economy,
+  refundable: true,
+  expiresAt: BigInt(1_800_000_000),
+  ticketWindow: 600,
+};
+const EXEC_ID = bookingId(QUOTE);
+const EXEC_HASH = "BECF62A723D7F8C08C8242D23E6C54571D80C717B8414B547008789C7C65F313";
+
+async function executedChain() {
+  const r = await roles;
+  const chain = await healthyChain();
+  chain.state.executed[r.owner.account.cosmos] = [
+    { hash: "AA".repeat(32), height: DEPLOY_BLOCK + BigInt(1), to: ESCROW as Hex, data: encodeBook({ ...QUOTE, expiresAt: BigInt(1) }, "0x01") },
+    { hash: EXEC_HASH, height: DEPLOY_BLOCK + BigInt(2), to: ESCROW as Hex, data: encodeBook(QUOTE, "0x01") },
+  ];
+  return chain;
+}
+
+test("booking state: a book() sent through the linked agent key is Locked, with its Cosmos tx", async () => {
+  const chain = await executedChain();
+  const r = await stateOf(chain, EXEC_ID);
+  assertOk(r);
+  assert.equal(r.state, "Locked");
+  assert.equal(r.booked?.hash, EXEC_HASH);
+  assert.equal(r.booked?.explorerUrl, `https://explore.qore.network/tx/${EXEC_HASH}`);
+  assert.equal(chain.broadcasts().length, 0);
+});
+
+test("booking state: Released and Refunded still come from the escrow's logs", async () => {
+  const chain = await executedChain();
+  const rel = released(EXEC_ID);
+  chain.state.logs.push(rel);
+  const r = await stateOf(chain, EXEC_ID);
+  assertOk(r);
+  assert.equal(r.state, "Released");
+  assert.equal(r.booked?.hash, EXEC_HASH);
+  assert.equal(r.released?.hash, rel.transactionHash);
+});
+
+test("booking state: an unreadable MsgExecuteEVM history is an honest failure, not None", async () => {
+  const chain = await executedChain();
+  chain.state.fail.executedEvmCalls = new Error("HTTP 502");
+  const r = await stateOf(chain, EXEC_ID);
+  assert.equal(r.ok, false);
+  assert.equal(!r.ok && r.code, "rpc error");
+});
+
+test("booking state: on the EOA lane the owner's Cosmos history is not read", async () => {
+  const chain = await executedChain();
+  const r = await stateOf(chain, EXEC_ID, env({ LIVE_BOOK_LANE: "eoa" }));
+  assertOk(r);
+  assert.equal(r.state, "None");
+  assert.equal(chain.callsTo("executedEvmCalls").length, 0);
 });
 
 test("booking state after a reload mid-lock: waits for the book() in flight, and lock is never sent twice", async () => {

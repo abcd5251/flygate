@@ -12,7 +12,6 @@ import {
   type UnifiedAccount,
 } from "@qorechain/sdk";
 import { retrying } from "../bootstrap/chain";
-import { feeUqor } from "./probe-lib";
 
 export interface EthNativeCtx {
   client: QoreChainClient;
@@ -21,6 +20,15 @@ export interface EthNativeCtx {
 }
 
 const GAS_PRICE_UQOR = "0.15";
+
+/** Fee in uqor for an explicit gas limit, rounded up (gas price in uqor per gas, e.g. "0.15"). */
+export function feeUqor(gas: number, gasPriceUqor: string): bigint {
+  const [whole, frac = ""] = gasPriceUqor.split(".");
+  const scale = BigInt(10) ** BigInt(frac.length);
+  const priceScaled = BigInt(whole || "0") * scale + BigInt(frac || "0");
+  const total = BigInt(gas) * priceScaled;
+  return (total + scale - BigInt(1)) / scale;
+}
 /** Registration carries a 2592-byte key + 4627-byte proof. */
 export const REGISTER_GAS = 1_000_000;
 export const WINDOW_GAS = 500_000;

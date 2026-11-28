@@ -195,14 +195,20 @@ export default function CheckoutPage() {
           const v = checkOffer(offer!, m, price);
           if (!v.ok) {
             const stopped = `${v.firstFail?.detail}. The agent stopped before paying.`;
-            setStep(key, { status: "failed", detail: stopped, at: Date.now() });
+            // Still running while the contract check runs: a failed step on a running booking
+            // would show the "Live step failed" callout for this expected refusal.
+            setStep(key, { detail: stopped });
             const cap = await chain.checkFareCap({ offerId: offer!.id, priceUsd: price, maxFareUsd: m.maxFareUsd, bookingId: b.bookingId });
+            if (cancelled) return "stop";
             if (cap.tx) addTx(cap.tx);
             // Live: the contract's own refusal, read with eth_call; no tx, no hash (D-17).
-            if (cap.source === "live") {
-              const onChain = cap.readResult ?? `On-chain check failed: ${cap.code ?? "error"} · ${cap.detail ?? ""}`;
-              setStep(key, { source: "live", readResult: cap.readResult, detail: `${stopped} ${onChain}` });
-            }
+            const onChain = cap.source === "live" ? (cap.readResult ?? `On-chain check failed: ${cap.code ?? "error"} · ${cap.detail ?? ""}`) : undefined;
+            setStep(key, {
+              status: "failed",
+              detail: onChain ? `${stopped} ${onChain}` : stopped,
+              ...(cap.source === "live" ? { source: "live" as const, readResult: cap.readResult } : {}),
+              at: Date.now(),
+            });
             update((st) => ({ ...st, scenario: "normal", booking: st.booking ? { ...st.booking, status: "blocked" } : st.booking }));
             return "stop";
           }

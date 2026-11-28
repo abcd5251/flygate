@@ -1,7 +1,7 @@
 import "server-only";
 import { linkAuthenticatorMsgs, openEvmWindowMsg, signAuthenticatorLinkEip191 } from "@qorechain/sdk";
 import { hexToBytes, pad } from "viem";
-import { Cabin as EscrowCabin, encodeSetMandate, EVENT_TOPICS, SELECTORS, unixDay, type OnchainMandate } from "@/lib/escrow";
+import { bookingIdOfBook, Cabin as EscrowCabin, encodeSetMandate, EVENT_TOPICS, SELECTORS, unixDay, type OnchainMandate } from "@/lib/escrow";
 import { PLACES } from "@/lib/mandate";
 import type { Cabin, Mandate } from "@/lib/types";
 import type { CosmosMsg, Hex, ServerChain } from "./chain";
@@ -9,8 +9,9 @@ import { MAX_FEE_UQOR, usdToUqor, WEI_PER_UQOR } from "./money";
 
 /**
  * The three owner transactions of a Live /mandate, in their fixed order (D-12): link the agent
- * key with its spending rule (Cosmos), open the Scoped window (Cosmos), then setMandate (EVM),
- * which is signed only after the window tx because opening a window advances the EVM nonce.
+ * key with its spending rule (Cosmos), open the Scoped window on the owner account (Cosmos), then
+ * setMandate (EVM) from the owner's coin-60 signer, which needs its own EVM window (`sendEvm`
+ * opens it).
  */
 export const LIVE_MANDATE_STEPS = ["link", "window", "mandate"] as const;
 export type LiveMandateStep = (typeof LIVE_MANDATE_STEPS)[number];
@@ -177,13 +178,23 @@ export function setMandateData(agent: Hex, mandate: OnchainMandate): Hex {
 }
 
 /**
- * Tickets the agent holds against its quota (D-29): its `Booked` events since the deploy block,
- * minus those later `Refunded`. Throws when the logs cannot be read; callers never guess.
+ * Tickets the agent holds against its quota (D-29): the bookings it made since the deploy block,
+ * minus those later `Refunded`. A book() sent as an EVM tx leaves a `Booked` log. One sent as a
+ * MsgExecuteEVM through the linked agent key leaves none that eth_getLogs returns, so on that
+ * lane `executor` (the qor1 account book() runs as) has its executed calls read and decoded too.
+ * Throws when either history cannot be read; callers never guess.
  */
-export async function countUsedTickets(chain: ServerChain, escrow: Hex, fromBlock: bigint, agent: Hex): Promise<number> {
+export async function countUsedTickets(chain: ServerChain, escrow: Hex, fromBlock: bigint, agent: Hex, executor?: string): Promise<number> {
   const booked = await chain.getLogs({ address: escrow, fromBlock, topics: [EVENT_TOPICS.Booked, null, pad(agent.toLowerCase() as Hex, { size: 32 })] });
-  if (booked.length === 0) return 0;
+  const held = new Set(booked.map((l) => l.topics[1]?.toLowerCase()));
+  if (executor) {
+    for (const call of await chain.executedEvmCalls(executor)) {
+      if (call.height < fromBlock || call.to.toLowerCase() !== escrow.toLowerCase() || !call.data.startsWith(SELECTORS.book)) continue;
+      held.add(bookingIdOfBook(call.data).toLowerCase());
+    }
+  }
+  if (held.size === 0) return 0;
   const refunded = await chain.getLogs({ address: escrow, fromBlock, topics: [EVENT_TOPICS.Refunded] });
-  const gone = new Set(refunded.map((l) => l.topics[1]?.toLowerCase()));
-  return booked.filter((l) => !gone.has(l.topics[1]?.toLowerCase())).length;
+  for (const l of refunded) held.delete(l.topics[1]?.toLowerCase());
+  return held.size;
 }

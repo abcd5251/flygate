@@ -43,6 +43,9 @@ export async function healthyChain(): Promise<FakeChain> {
         pubkey: r.merchantPqc.publicKey,
         possessionProven: true,
       },
+      // The coin-60 signers' own keys (they send every EVM tx).
+      [r.owner.signer.address.toLowerCase()]: { registered: true, algorithmId: 1, pubkey: new Uint8Array(2592), possessionProven: true },
+      [r.agent.signer.address.toLowerCase()]: { registered: true, algorithmId: 1, pubkey: new Uint8Array(2592), possessionProven: true },
     },
     bank: { [r.owner.account.cosmos]: BigInt(60) * QOR, [r.agent.account.cosmos]: BigInt(20) * QOR },
     evm: {

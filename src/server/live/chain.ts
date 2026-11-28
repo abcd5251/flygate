@@ -60,6 +60,18 @@ export interface EvmLog {
   transactionHash: Hex;
 }
 
+/**
+ * A MsgExecuteEVM an account ran through a linked key, and whose execution did not fail. The
+ * EVM logs of such a call never reach eth_getLogs, so this is the only trace of them.
+ */
+export interface ExecutedEvmCall {
+  /** Cosmos tx hash. */
+  hash: string;
+  height: bigint;
+  to: Hex;
+  data: Hex;
+}
+
 export interface LogFilter {
   address: Hex;
   fromBlock: bigint;
@@ -113,6 +125,11 @@ export interface ServerChain {
   evmBalance(address: Hex): Promise<bigint>;
   /** eth_getLogs from `fromBlock` to latest. Throws when the logs cannot be read in full. */
   getLogs(filter: LogFilter): Promise<EvmLog[]>;
+  /**
+   * Every MsgExecuteEVM that ran as `account` (qor1) without an execution failure, oldest
+   * first. Throws when the history cannot be read in full (e.g. the node pruned it).
+   */
+  executedEvmCalls(account: string): Promise<ExecutedEvmCall[]>;
   /** Keys linked to a qor1 account, revoked ones included; none before the account's first link creates it. */
   linkedKeys(cosmos: string): Promise<LinkedKey[]>;
   /** eth_call at latest. Resolves with the revert data when the call reverts; throws on RPC errors. */
@@ -129,6 +146,10 @@ export interface ServerChain {
    * registered ML-DSA-87 key; waits for inclusion. Lane "cosmos", Cosmos hash.
    */
   sendCosmos(from: LiveRole, messages: CosmosMsg[], opts: BroadcastOptions): Promise<BroadcastOutcome>;
-  /** One EVM tx from `from`'s coin-60 signer; waits for the receipt. Lane "evm", 0x hash. */
+  /**
+   * One EVM tx from `from`'s coin-60 signer; waits for the receipt. Lane "evm", 0x hash. First
+   * opens an EVM window on that signer when the open one does not admit the tx (docs/FLOW.md);
+   * a failed window tx is the outcome (lane "cosmos") and the EVM tx is then not sent.
+   */
   sendEvm(from: LiveRole, tx: EvmTxRequest, opts: BroadcastOptions): Promise<BroadcastOutcome>;
 }

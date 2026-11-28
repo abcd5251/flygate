@@ -32,7 +32,7 @@
 - live-checkout/D-26｜不做無聲自動退回：提供「Finish in Simulated mode」按鈕，鎖住的錢用 pnpm live:sweep 清理｜假設｜高｜有效
 - live-checkout/D-27｜/api/live/status 檢查地址、chain id、商家 PQC 金鑰與各帳號餘額，結果快取 30 秒｜程式碼｜中｜有效
 - live-checkout/D-28｜廣播不重試；伺服器用 (step, bookingId) 做冪等；重新整理後查事件推導狀態，不重送｜程式碼｜高｜有效
-- live-checkout/D-29｜鏈上 maxTickets = 從 log 算出的已用張數 + mandate.maxTickets｜假設｜高｜有效
+- live-checkout/D-29｜鏈上 maxTickets = 已用張數（Booked log + owner 成功執行的 MsgExecuteEVM book()）+ mandate.maxTickets｜實測｜高｜已修正
 - live-checkout/D-30｜等到上鏈才算完成，保留原本的動畫節奏，每步最多等 30 秒｜文件｜低｜有效
 - live-checkout/D-31｜chain.ts 加 ChainPort 介面，分成 simulated 與 live 兩份實作；伺服器端放在 src/server/live｜程式碼｜中｜有效
 - live-checkout/D-32｜商家用 derivePqcCanonical 推導、已註冊上鏈的金鑰簽章，不用 merchantKeys(seed)｜程式碼｜高｜有效

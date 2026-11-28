@@ -88,11 +88,22 @@ test("unavailable when the merchant's on-chain PQC key is missing, wrong or unpr
   }
 });
 
-test("pqcKeyStatus is read for the merchant's bootstrap account, as FlightEscrow does", async () => {
+test("pqcKeyStatus is read for the merchant's bootstrap account, as FlightEscrow does, then for both EVM signers", async () => {
   const r = await roles;
   const chain = await healthyChain();
   await statusOf(chain);
-  assert.deepEqual(chain.callsTo("pqcKeyStatus").map((c) => c.args[0]), [r.merchant.account.evm]);
+  assert.deepEqual(chain.callsTo("pqcKeyStatus").map((c) => c.args[0]), [r.merchant.account.evm, r.owner.signer.address, r.agent.signer.address]);
+});
+
+test("unavailable when an EVM signer has no registered ML-DSA-87 key", async () => {
+  const r = await roles;
+  for (const role of ["owner", "agent"] as const) {
+    const chain = await healthyChain();
+    delete chain.state.pqc[r[role].signer.address.toLowerCase()];
+    const st = await statusOf(chain);
+    assert.equal(st.available, false);
+    assert.match(st.reason ?? "", role === "owner" ? /^Owner EVM signer has no registered ML-DSA-87 key/ : /^Agent EVM signer has no registered ML-DSA-87 key/);
+  }
 });
 
 test("unavailable when the owner cannot pay one max fare plus fees", async () => {

@@ -102,14 +102,8 @@ export function allowedEvmCall(target: string, selector: string): string {
   return `${target.toLowerCase()}/${selector.toLowerCase()}`;
 }
 
-/** Fee in uqor for an explicit gas limit, rounded up (gas price in uqor per gas, e.g. "0.15"). */
-export function feeUqor(gas: number, gasPriceUqor: string): bigint {
-  const [whole, frac = ""] = gasPriceUqor.split(".");
-  const scale = BigInt(10) ** BigInt(frac.length);
-  const priceScaled = BigInt(whole || "0") * scale + BigInt(frac || "0");
-  const total = BigInt(gas) * priceScaled;
-  return (total + scale - BigInt(1)) / scale;
-}
+// Lives in eth-native.ts so the Live server can open signer windows without this module.
+export { feeUqor } from "./eth-native";
 
 export const explorerTxUrl = (explorer: string, hash: string) => `${explorer}/tx/${hash}`;
 
