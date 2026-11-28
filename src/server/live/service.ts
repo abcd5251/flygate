@@ -189,10 +189,10 @@ export function createLiveService({ chain, config, clock }: LiveServiceDeps): Li
         return refused(step, "ticket count unknown", "FLIGHT_ESCROW_DEPLOY_BLOCK is not set, so the tickets already used cannot be counted; nothing was sent");
       }
       try {
-        used = await countUsedTickets(chain, escrow, config.deployBlock, bookSender(config.lane, k));
+        used = await countUsedTickets(chain, escrow, config.deployBlock, bookSender(config.lane, k), config.lane === "authenticator" ? owner.cosmos : undefined);
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
-        return refused(step, "ticket count unknown", `Could not read Booked/Refunded logs (${why}), so the tickets already used are unknown; nothing was sent`);
+        return refused(step, "ticket count unknown", `Could not read the bookings made so far (${why}), so the tickets already used are unknown; nothing was sent`);
       }
     }
 

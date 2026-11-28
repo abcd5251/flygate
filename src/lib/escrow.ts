@@ -2,6 +2,7 @@ import { ml_dsa87 } from "@noble/post-quantum/ml-dsa.js";
 import {
   bytesToHex,
   concat,
+  decodeFunctionData,
   encodeAbiParameters,
   hexToBytes,
   encodeFunctionData,
@@ -259,6 +260,13 @@ export function encodeCancelProof(c: CancelProof): Hex {
 /** bookingId = keccak256(abi.encode(quote)); known before the booking tx lands. */
 export function bookingId(q: Quote): Hex {
   return keccak256(encodeQuote(q));
+}
+
+/** The bookingId a `book(quote, signature)` call locks, read from its calldata. */
+export function bookingIdOfBook(data: Hex): Hex {
+  const { functionName, args } = decodeFunctionData({ abi: FLIGHT_ESCROW_ABI, data });
+  if (functionName !== "book") throw new Error(`not book() calldata: ${functionName}`);
+  return keccak256(encodeAbiParameters(quoteAbi, [args[0]]));
 }
 
 /** Where a signature is valid: the chain and the FlightEscrow deployment. */

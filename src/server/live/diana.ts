@@ -34,6 +34,7 @@ import { decodePqcKeyStatus, encodePqcKeyStatusCall, PQC_KEY_STATUS_ADDRESS } fr
 import type { BroadcastOutcome, CosmosMsg, EthCallResult, EvmLog, Hex, ServerChain } from "./chain";
 import type { LiveNetwork, LiveRole } from "./config";
 import { withExtraGas } from "./fee";
+import { executedEvmCallsOf, type TxResponse } from "./executed-calls";
 import { linkedKeysOrNone } from "./linked-keys";
 import { signerWindowToOpen } from "./signer-window";
 
@@ -63,6 +64,30 @@ async function evmRead<T>(url: string, method: string, params: unknown[]): Promi
 }
 
 const toHexQty = (n: bigint) => `0x${n.toString(16)}`;
+
+/** Txs per page of the Cosmos tx search (the SDK caps a page at 100). */
+const TX_PAGE_LIMIT = 100;
+
+/**
+ * Every tx whose messages `sender` signed, oldest first, through the Cosmos tx search. Reads
+ * every page, retried on rate limiting only; throws when any page cannot be read (a pruned node
+ * answers "height … is not available").
+ */
+async function txsSentBy(rest: string, sender: string): Promise<TxResponse[]> {
+  const out: TxResponse[] = [];
+  for (let page = 1; ; page++) {
+    const q = new URLSearchParams({ query: `message.sender='${sender}'`, order_by: "ORDER_BY_ASC", page: String(page), limit: String(TX_PAGE_LIMIT) });
+    const body = await retrying(async () => {
+      const res = await fetch(`${rest}/cosmos/tx/v1beta1/txs?${q}`, { signal: AbortSignal.timeout(READ_TIMEOUT_MS), cache: "no-store" });
+      const json = (await res.json().catch(() => ({}))) as { tx_responses?: TxResponse[]; total?: string; message?: string };
+      if (!res.ok) throw new Error(`tx search: HTTP ${res.status}${json.message ? `: ${json.message}` : ""}`);
+      return json;
+    });
+    const txs = body.tx_responses ?? [];
+    out.push(...txs);
+    if (txs.length < TX_PAGE_LIMIT || out.length >= Number(body.total ?? 0)) return out;
+  }
+}
 
 /**
  * eth_call at latest. A JSON-RPC error that carries revert data (or says "reverted") is the
@@ -228,6 +253,9 @@ export function createDianaChain(network: LiveNetwork, mnemonics: Partial<Record
         for (const l of logs) out.push({ ...l, blockNumber: BigInt(l.blockNumber) });
       }
       return out;
+    },
+    async executedEvmCalls(account) {
+      return executedEvmCallsOf(await txsSentBy(network.rest, account), account);
     },
     async linkedKeys(cosmos) {
       const keys = await linkedKeysOrNone(() => retrying(() => fetchAuthenticators({ rest: network.rest, address: cosmos })));

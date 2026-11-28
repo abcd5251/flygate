@@ -1,6 +1,6 @@
 import "server-only";
 import { executeEvmMsg, evmAuthSignBytes, evmAuthSignBytesV2 } from "@qorechain/sdk";
-import { decodeFunctionResult, hexToBytes, keccak256, stringToBytes } from "viem";
+import { decodeErrorResult, decodeFunctionResult, hexToBytes, keccak256, stringToBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { BookingStateResult, CancelResult, CheckoutQuote, FareCapCheck, QuoteCheck, TicketProofResult } from "@/lib/chain";
 import {
@@ -24,7 +24,7 @@ import {
 import { usd } from "@/lib/mandate";
 import { DEMO_OFFERS, PRICE_CHANGE_USD } from "@/lib/offers";
 import type { Cabin, ChainTx, Mandate, Offer, Scenario } from "@/lib/types";
-import type { CosmosMsg, EvmAuthDigestVersion, Hex, ServerChain } from "./chain";
+import type { BroadcastOutcome, CosmosMsg, EthCallRequest, EvmAuthDigestVersion, Hex, ServerChain } from "./chain";
 import { createCancelStep } from "./cancel";
 import type { BookLane, LiveConfig } from "./config";
 import { fareCapCheck } from "./farecap";
@@ -177,6 +177,24 @@ export async function bookExecuteMsg(o: {
   });
 }
 
+/**
+ * A failed authenticator execution only says "evm transaction execution failed". Replaying the
+ * same call with eth_call (state is unchanged, since it reverted) names FlightEscrow's error,
+ * e.g. `TicketQuotaExhausted(1)`. Sends nothing; when the replay names nothing, the chain's
+ * reason stays.
+ */
+export async function withRevertName(chain: ServerChain, outcome: BroadcastOutcome, call: EthCallRequest): Promise<BroadcastOutcome> {
+  if (outcome.status !== "reverted" || outcome.code !== "execution failed") return outcome;
+  try {
+    const r = await chain.ethCall(call);
+    if (r.status !== "reverted") return outcome;
+    const e = decodeErrorResult({ abi: FLIGHT_ESCROW_ABI, data: r.data });
+    return { ...outcome, reason: `${e.errorName}(${(e.args ?? []).map(String).join(", ")}) · ${outcome.reason}` };
+  } catch {
+    return outcome;
+  }
+}
+
 // ------------------------------------------------------------------ the service part
 
 export interface CheckoutDeps {
@@ -323,7 +341,9 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
         digestVersion,
       });
       // Code 0 can still be a failed execution: the chain checks the execution results (D-09).
-      return asCached(tx.fromOutcome("agent", text, await chain.sendCosmos("agent", [msg], { ...opts, authenticatorExecutions: true, extraGas: Number(BOOK_GAS_LIMIT) })));
+      const outcome = await chain.sendCosmos("agent", [msg], { ...opts, authenticatorExecutions: true, extraGas: Number(BOOK_GAS_LIMIT) });
+      const named = await withRevertName(chain, outcome, { to: b.domain.escrow, data, from: k.roles.owner.account.evm, value: b.quote.priceWei });
+      return asCached(tx.fromOutcome("agent", text, named));
     };
     return (await once("lock", id, run, (err) => ({ broadcast: true, ok: false, response: tx.refused("agent", b ? lockText(b) : unknown, "internal error", errorText(err)).tx }))) as ChainTx;
   }
@@ -382,6 +402,7 @@ export function createCheckout({ chain, config, clock, liveEscrow, keys }: Check
     chain,
     explorer: config.network.explorer,
     deployBlock: config.deployBlock,
+    executor: async () => (config.lane === "authenticator" ? (await keys()).roles.owner.account.cosmos : undefined),
     liveEscrow,
     async settle(id) {
       const pending = [...done].filter(([key]) => key.endsWith(`:${id}`)).map(([, p]) => p);

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { evmAuthSignBytesV2 } from "@qorechain/sdk";
-import { bytesToHex, decodeFunctionData, hexToString, keccak256, recoverMessageAddress, stringToBytes, type Hex } from "viem";
+import { bytesToHex, decodeFunctionData, encodeErrorResult, hexToString, keccak256, recoverMessageAddress, stringToBytes, type Hex } from "viem";
 import type { CheckoutQuote, QuoteCheck, TicketProofResult } from "@/lib/chain";
 import { bookingId, FLIGHT_ESCROW_ABI, PQC_VERIFY_ADDRESS, unixDay } from "@/lib/escrow";
 import { defaultMandate } from "@/lib/mandate";
@@ -222,6 +222,42 @@ test("code 0 but a failed authenticator execution: not a Live tx, carries the er
   assert.equal(proof.release.ok, false);
   assert.equal(proof.proof.code, "out of order");
   assert.equal(chain.broadcasts().length, 1);
+});
+
+test("a failed authenticator execution is replayed with eth_call to name the contract's error", async () => {
+  const r = await roles;
+  const chain = await healthyChain();
+  chain.state.outcomes.push({ mode: "revert", code: "execution failed", reason: "execution reverted: evm transaction execution failed" });
+  chain.state.ethCall = () => ({
+    status: "reverted",
+    data: encodeErrorResult({ abi: FLIGHT_ESCROW_ABI, errorName: "TicketQuotaExhausted", args: [1] }),
+    reason: "execution reverted",
+  });
+  const svc = service(chain);
+  const q = await quoteOf(svc);
+  const lock = await lockOf(svc, q.bookingId);
+  assert.equal(lock.ok, false);
+  assert.equal(lock.code, "execution failed");
+  assert.match(lock.reason ?? "", /TicketQuotaExhausted\(1\)/);
+  assert.equal(chain.broadcasts().length, 1, "the replay sends nothing");
+
+  const [replay] = chain.callsTo("ethCall").map((c) => c.args[0] as EthCallRequest);
+  const sent = execMsg(chain);
+  assert.equal(replay.to, ESCROW);
+  assert.equal(replay.from, r.owner.account.evm, "book() ran from the owner account's 0x address");
+  assert.equal(replay.data, bytesToHex(sent.data));
+  assert.equal(replay.value, BigInt(sent.value));
+});
+
+test("when the replay cannot name the error, the chain's reason stays", async () => {
+  const chain = await healthyChain();
+  chain.state.outcomes.push({ mode: "revert", code: "execution failed", reason: "execution reverted: evm transaction execution failed" });
+  chain.state.fail.ethCall = new Error("HTTP 502");
+  const svc = service(chain);
+  const q = await quoteOf(svc);
+  const lock = await lockOf(svc, q.bookingId);
+  assert.equal(lock.code, "execution failed");
+  assert.match(lock.reason ?? "", /evm transaction execution failed/);
 });
 
 test("a timeout returns a failed step", async () => {

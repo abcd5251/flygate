@@ -10,6 +10,7 @@ import type {
   EvmAuthDigestVersion,
   EvmLog,
   EvmTxRequest,
+  ExecutedEvmCall,
   Hex,
   LinkedKey,
   LogFilter,
@@ -36,6 +37,8 @@ export interface FakeChainState {
   evm: Record<string, bigint>;
   /** Every log on the chain; getLogs filters them. */
   logs: EvmLog[];
+  /** Successful MsgExecuteEVM calls per qor1 account. */
+  executed: Record<string, ExecutedEvmCall[]>;
   /** Linked keys per qor1 account. */
   linked: Record<string, LinkedKey[]>;
   /** Authenticator sequence per `${qor1}/${lowercase 0x pubkey}`; missing means 0. */
@@ -73,7 +76,7 @@ export class FakeChain implements ServerChain {
   private sent = 0;
 
   constructor(state: Partial<FakeChainState> = {}) {
-    this.state = { chainId: 9800, code: {}, pqc: {}, bank: {}, evm: {}, logs: [], linked: {}, authNonces: {}, digestVersion: "v2", fail: {}, outcomes: [], ...state };
+    this.state = { chainId: 9800, code: {}, pqc: {}, bank: {}, evm: {}, logs: [], executed: {}, linked: {}, authNonces: {}, digestVersion: "v2", fail: {}, outcomes: [], ...state };
   }
 
   private record(method: keyof ServerChain, args: unknown[]) {
@@ -119,6 +122,10 @@ export class FakeChain implements ServerChain {
         log.blockNumber >= filter.fromBlock &&
         filter.topics.every((t, i) => t === null || log.topics[i]?.toLowerCase() === t.toLowerCase()),
     );
+  }
+  async executedEvmCalls(account: string) {
+    this.record("executedEvmCalls", [account]);
+    return this.state.executed[account] ?? [];
   }
   async linkedKeys(cosmos: string) {
     this.record("linkedKeys", [cosmos]);

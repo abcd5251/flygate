@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decodeFunctionData, pad, stringToHex, type Hex } from "viem";
-import { EVENT_TOPICS, FLIGHT_ESCROW_ABI, SELECTORS } from "@/lib/escrow";
+import { bookingId, Cabin, encodeBook, EVENT_TOPICS, FLIGHT_ESCROW_ABI, SELECTORS, type Quote } from "@/lib/escrow";
 import { defaultMandate } from "@/lib/mandate";
 import type { Mandate } from "@/lib/types";
-import type { CosmosMsg, EvmLog, EvmTxRequest } from "./chain";
+import type { CosmosMsg, EvmLog, EvmTxRequest, ExecutedEvmCall } from "./chain";
 import { readLiveConfig, type Env } from "./config";
 import type { FakeChain } from "./fake-chain";
 import { handleLiveMandate } from "./http";
@@ -44,17 +44,41 @@ function decodeSetMandate(tx: EvmTxRequest) {
   return { agent, mandate };
 }
 
-function bookedLog(agent: string, id: number, block = DEPLOY_BLOCK + BigInt(id)): EvmLog {
+const idTopic = (id: number | Hex) => (typeof id === "number" ? pad(`0x${id.toString(16)}`, { size: 32 }) : id);
+function bookedLog(agent: string, id: number | Hex, block = DEPLOY_BLOCK + BigInt(typeof id === "number" ? id : 1)): EvmLog {
   return {
     address: ESCROW,
-    topics: [EVENT_TOPICS.Booked, pad(`0x${id.toString(16)}`, { size: 32 }), pad(agent.toLowerCase() as Hex, { size: 32 }), pad("0x02", { size: 32 })],
+    topics: [EVENT_TOPICS.Booked, idTopic(id), pad(agent.toLowerCase() as Hex, { size: 32 }), pad("0x02", { size: 32 })],
     data: "0x",
     blockNumber: block,
-    transactionHash: pad(`0x${id.toString(16)}`, { size: 32 }),
+    transactionHash: idTopic(id),
   };
 }
-function refundedLog(id: number): EvmLog {
-  return { ...bookedLog("0x00", id), topics: [EVENT_TOPICS.Refunded, pad(`0x${id.toString(16)}`, { size: 32 })] };
+function refundedLog(id: number | Hex): EvmLog {
+  return { ...bookedLog("0x00", id), topics: [EVENT_TOPICS.Refunded, idTopic(id)] };
+}
+
+/** A quote the agent booked; `n` keeps each one's bookingId distinct. */
+function bookedQuote(agent: Hex, n: number): Quote {
+  return {
+    merchant: "0x4f9838Cc3A7F73c1aF4910DB99A8f34fc3C7E574",
+    agent,
+    owner: "0xb73af9e1AC316Eb1B1a160c7866F3D937178F5F0",
+    offerId: pad("0x01", { size: 32 }),
+    priceWei: BigInt(389) * BigInt(10) ** BigInt(16),
+    origin: "TPE",
+    destination: "NRT",
+    departDay: 20807,
+    cabin: Cabin.Economy,
+    refundable: true,
+    expiresAt: BigInt(1_800_000_000 + n),
+    ticketWindow: 600,
+  };
+}
+const setMandateDataOf = (agent: Hex): Hex => `${SELECTORS.setMandate}${agent.slice(2).padStart(64, "0")}` as Hex;
+/** A MsgExecuteEVM that ran without an execution failure, as the owner's tx history lists it. */
+function executed(data: Hex, o: { to?: Hex; height?: bigint } = {}): ExecutedEvmCall {
+  return { hash: "AB".repeat(32), height: o.height ?? DEPLOY_BLOCK + BigInt(10), to: o.to ?? ESCROW, data };
 }
 
 // ------------------------------------------------------------------ encoding constants
@@ -231,6 +255,46 @@ test("first round: no logs means 0 used, so maxTickets = mandate.maxTickets", as
   const chain = await healthyChain();
   await signAll(service(chain), { ...defaultMandate(), maxTickets: 2 });
   assert.equal(decodeSetMandate(evmTx(chain, 2)).mandate.maxTickets, 2);
+});
+
+test("bookings made through the linked agent key count: their Booked logs never reach eth_getLogs", async () => {
+  const r = await roles;
+  const chain = await healthyChain();
+  const agent = r.owner.account.evm;
+  const q = (n: number) => bookedQuote(agent, n);
+  chain.state.executed = {
+    [r.owner.account.cosmos]: [
+      executed(encodeBook(q(1), "0x01")),
+      executed(encodeBook(q(2), "0x01")), // refunded below
+      executed(encodeBook(q(3), "0x01")), // its Booked log also reached eth_getLogs: counted once
+      executed(encodeBook(q(4), "0x01"), { height: DEPLOY_BLOCK - BigInt(1) }), // before FlightEscrow
+      executed(encodeBook(q(5), "0x01"), { to: "0x3333333333333333333333333333333333333333" }), // not FlightEscrow
+      executed(setMandateDataOf(agent)), // not book()
+    ],
+  };
+  chain.state.logs = [refundedLog(bookingId(q(2))), bookedLog(agent, bookingId(q(3))), bookedLog(agent, 7)];
+  const [, , tx] = await signAll(service(chain));
+  assert.equal(tx.ok, true);
+  assert.equal(decodeSetMandate(evmTx(chain, 2)).mandate.maxTickets, 3 + 1, "q1, q3 and booking 7 are held; q2 was refunded");
+  const reads = chain.callsTo("executedEvmCalls");
+  assert.ok(reads.length > 0);
+  for (const c of reads) assert.equal(c.args[0], r.owner.account.cosmos, "book() runs as the owner account");
+});
+
+test("on the EOA lane every book() is an EVM tx, so the owner's Cosmos history is not read", async () => {
+  const chain = await healthyChain();
+  await signAll(service(chain, env({ LIVE_BOOK_LANE: "eoa" })));
+  assert.equal(chain.callsTo("executedEvmCalls").length, 0);
+});
+
+test("when the owner's MsgExecuteEVM history cannot be read, signing fails and nothing is broadcast", async () => {
+  const chain = await healthyChain();
+  chain.state.fail.executedEvmCalls = new Error("height 5364103 is not available, lowest height is 8790799");
+  const tx = await service(chain).setupMandate({ step: "link", mandate: defaultMandate(), mandateHash: HASH });
+  assert.equal(tx.ok, false);
+  assert.equal(tx.code, "ticket count unknown");
+  assert.match(tx.reason!, /lowest height/);
+  assert.equal(chain.broadcasts().length, 0);
 });
 
 test("when the logs cannot be read, signing fails with the reason and nothing is broadcast", async () => {
